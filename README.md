@@ -10,7 +10,6 @@ A district-level machine learning and analytics platform for monitoring, classif
 
 The system integrates nutrition surveillance data, climate indicators, forecasting models, and geospatial visualizations to support early warning and decision-making for public health programs.
 
----
 
 # Project Overview
 
@@ -26,7 +25,6 @@ This platform was developed as a prototype decision-support system to:
 
 The application is built using Streamlit and machine learning techniques for interactive analytics and forecasting.
 
----
 
 # Key Features
 
@@ -45,7 +43,6 @@ Risk classification is based on:
 - Trend behaviour
 - District-level comparisons
 
----
 
 ## 2. Forecasting Module
 
@@ -57,8 +54,6 @@ The forecasting module predicts short-term acute malnutrition trends using machi
 - Trend visualization
 - District-level projections
 
----
-
 ## 3. Machine Learning Classification
 
 The classification component predicts district risk levels using engineered indicators and surveillance trends.
@@ -69,7 +64,6 @@ The classification component predicts district risk levels using engineered indi
 - Performance evaluation metrics
 - Feature importance analysis
 
----
 
 ## 4. Geospatial Risk Mapping
 
@@ -79,8 +73,6 @@ Interactive district-level maps are used to visualize nutrition risk patterns ac
 - GeoJSON district boundaries
 - District comparison views
 - Regional distribution analysis
-
----
 
 ## 5. Trend Monitoring
 
@@ -92,8 +84,6 @@ The application supports longitudinal monitoring of malnutrition patterns.
 - District-level progression analysis
 - Risk transition monitoring
 
----
-
 ## 6. Correlation Analysis
 
 The platform explores relationships between nutrition outcomes and associated indicators.
@@ -104,21 +94,10 @@ The platform explores relationships between nutrition outcomes and associated in
 - Variable association monitoring
 - Comparative indicator analysis
 
----
-
-# System Architecture within the DHIS2
+# System Architecture within the DHIS2 ecosystem
 
 The application follows a modular workflow:
-
-1. Data Loading
-2. Data Cleaning
-3. Feature Engineering
-4. Risk Classification
-5. Forecasting
-6. Visualization
-7. Reporting
-
----
+![System setup in the DHIS2 eco system](Screenshots/architecture.png)
 
 # Machine Learning Models
 
@@ -131,8 +110,6 @@ Advantages:
 - Handles non-linear relationships
 - Suitable for complex public health data
 
----
-
 ## Random Forest Classifier
 
 Used for:
@@ -143,8 +120,6 @@ Advantages:
 - Supports feature importance analysis
 - Performs well with complex interactions
 
----
-
 # Data Sources
 
 The system integrates multiple datasets including:
@@ -153,8 +128,6 @@ The system integrates multiple datasets including:
 - Climate indicators
 - District metadata
 - Historical nutrition trends
-
----
 
 # Model Evaluation
 
@@ -171,7 +144,6 @@ This system is intended as:
 - A decision-support tool
 - A surveillance enhancement platform
 
----
 
 # Intended Users
 
@@ -181,8 +153,6 @@ The platform may support:
 - Humanitarian organisations
 - Public health analysts
 - District health offices
-
----
 
 The app combines:
 
@@ -195,8 +165,6 @@ The app combines:
 - historical risk trend monitoring;
 - district GeoJSON risk maps.
 
----
-
 ## App Screens
 
 ### 1. Raw Classified Data
@@ -204,49 +172,39 @@ After uploading your CSV, the app classifies each district record and displays t
 
 ![Raw Classified Data](Screenshots/Screenshot1.png)
 
----
-
 ### 2. Current Observed Risk
 Choropleth maps showing the latest within-district and between-districts risk levels across all Uganda districts.
 
 ![Current Observed Risk](Screenshots/Screenshot2.png)
 
----
 
 ### 3. Historical Risk Trends
 Stacked area chart showing how district risk levels have evolved over time, with a 6-month Emergency trend overlay.
 
 ![Historical Risk Trends](Screenshots/Screenshot3.png)
 
----
 
 ### 4. Spearman Correlation Portrait — All Districts
 Radial chart showing rank-based correlations between acute malnutrition and all covariates across all districts.
 
 ![Spearman Correlation All Districts](Screenshots/Screenshot4.png)
 
----
-
 ### 5. Spearman Correlation Portrait — Karaeng District
 District-level Spearman correlation portrait for Karaeng District, showing local variable associations.
 
 ![Spearman Correlation Karaeng District](Screenshots/Screenshot5.png)
-
----
 
 ### 6. Forecast and 3-Month Risk Change — Within-District
 3-month forecast with predicted case counts and risk change map using within-district thresholds.
 
 ![Forecast Within-District Risk](Screenshots/Screenshot6.png)
 
----
 
 ### 7. Forecast and 3-Month Risk Change — Between-Districts
 3-month forecast with predicted case counts and risk change map using between-districts thresholds.
 
 ![Forecast Between-Districts Risk](Screenshots/Screenshot7.png)
 
----
 
 ## Data Requirements
 
