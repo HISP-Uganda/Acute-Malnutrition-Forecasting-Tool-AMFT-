@@ -106,7 +106,7 @@ The platform explores relationships between nutrition outcomes and associated in
 
 ---
 
-# System Architecture
+# System Architecture within the DHIS2
 
 The application follows a modular workflow:
 
