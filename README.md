@@ -19,6 +19,138 @@ A district-level machine learning and analytics platform for monitoring, classif
 The application follows a modular workflow:
 ![System setup in the DHIS2 eco system](Screenshots/architecture.png)
 
+# Installation Guide
+
+## 1. Install Python
+
+Download and install Python (version 3.10 or later):
+
+https://www.python.org/downloads/
+
+During installation on Windows, ensure you check:
+
+```text
+Add Python to PATH
+```
+
+Verify installation:
+
+```bash
+python --version
+```
+
+## 2. Download or Clone the Project
+
+### Using Git
+
+```bash
+git clone https://github.com/your-repository/project-name.git
+```
+
+Move into the project folder:
+
+```bash
+cd project-name
+```
+
+### Or Download ZIP
+
+- Download the project ZIP file
+- Extract it to your preferred location
+- Open a terminal inside the extracted project folder
+
+## 3. Create a Virtual Environment (Recommended)
+
+### Windows
+
+```bash
+python -m venv venv
+```
+
+Activate the environment:
+
+```bash
+venv\Scripts\activate
+```
+
+### Linux / macOS
+
+```bash
+python3 -m venv venv
+```
+
+Activate the environment:
+
+```bash
+source venv/bin/activate
+```
+
+## 4. Install Required Packages
+
+Install all dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+If Streamlit is not included:
+
+```bash
+pip install streamlit
+```
+
+## 5. Run the Application
+
+Start the Streamlit application:
+
+```bash
+streamlit run app.py
+```
+
+The application will open automatically in your browser.
+
+Default local address:
+
+```text
+http://localhost:8501
+```
+
+## 6. Stopping the Application
+
+To stop the application:
+
+```text
+CTRL + C
+```
+
+in the terminal window.
+
+# Troubleshooting
+
+## Streamlit command not found
+
+Install Streamlit manually:
+
+```bash
+pip install streamlit
+```
+
+## Port already in use
+
+Run the application on another port:
+
+```bash
+streamlit run app.py --server.port 8502
+```
+
+## Missing package errors
+
+Reinstall dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
 # Machine Learning Models
 
 ## Random Forest Regressor
