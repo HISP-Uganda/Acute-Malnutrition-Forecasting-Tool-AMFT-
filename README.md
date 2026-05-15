@@ -1,98 +1,18 @@
-python3 << 'EOF'
-content = '''[![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io)
-[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![GitHub stars](https://img.shields.io/github/stars/Awinosarah/acute-malnutrition-early-warning?style=for-the-badge)](https://github.com/Awinosarah/acute-malnutrition-early-warning/stargazers)
+# Acute Malnutrition Forecasting Tool (AMFT)
 
-# Acute Malnutrition Early Warning System
-
-A district-level machine learning and analytics platform for monitoring, classifying, and forecasting acute malnutrition risk in Uganda.
-
-The system integrates nutrition surveillance data, climate indicators, forecasting models, and geospatial visualizations to support early warning and decision-making for public health programs.
-
-
-# Project Overview
-
-Acute malnutrition remains a major public health concern in vulnerable populations. Early identification of high-risk districts is critical for preparedness, resource allocation, and timely intervention.
-
-This platform was developed as a prototype decision-support system to:
-
-- Monitor district-level malnutrition trends
-- Classify nutrition risk severity
-- Forecast future malnutrition burden
-- Visualize spatial and temporal patterns
-- Support evidence-based planning
-
-The application is built using Streamlit and machine learning techniques for interactive analytics and forecasting.
-
+A district-level machine learning and analytics platform for monitoring, classifying, and forecasting acute malnutrition risk in Uganda. The system integrates nutrition, climate, and environmental data with forecasting models and geospatial visualizations to support early warning, hotspot identification, and evidence-based decision-making for public health and nutrition programs. The current version is built using Streamlit and Python-based machine learning frameworks to support interactive analytics, forecasting, and visualization. The tool is currently under development and is planned for deployment and integration within the DHIS2 and Climate Health Analytics Platform (CHAP) ecosystem to support full operationalization and routine use.
 
 # Key Features
-
-## 1. District Risk Classification
-
-The system classifies districts into risk categories:
-
-- Normal
-- Alert
-- Alarm
-- Emergency
-
-Risk classification is based on:
-- Historical malnutrition burden
-- Percentile thresholds
-- Trend behaviour
-- District-level comparisons
-
-
-## 2. Forecasting Module
-
-The forecasting module predicts short-term acute malnutrition trends using machine learning.
-
-### Forecasting Features
-- 3-month forecasting
-- Random Forest Regression
-- Trend visualization
-- District-level projections
-
-## 3. Machine Learning Classification
-
-The classification component predicts district risk levels using engineered indicators and surveillance trends.
-
-### Classification Features
-- Random Forest Classification
-- Risk prediction probabilities
-- Performance evaluation metrics
-- Feature importance analysis
-
-
-## 4. Geospatial Risk Mapping
-
-Interactive district-level maps are used to visualize nutrition risk patterns across Uganda.
-
-### Mapping Features
-- GeoJSON district boundaries
-- District comparison views
-- Regional distribution analysis
-
-## 5. Trend Monitoring
-
-The application supports longitudinal monitoring of malnutrition patterns.
-
-### Trend Features
-- Historical case trends
-- Regional comparison charts
-- District-level progression analysis
-- Risk transition monitoring
-
-## 6. Correlation Analysis
-
-The platform explores relationships between nutrition outcomes and associated indicators.
-
-### Analytics Included
-- Spearman correlation analysis
-- Radial/radar visualization
-- Variable association monitoring
-- Comparative indicator analysis
+- Integration of climate, health, nutrition, and environmental data from multiple sources
+- Covariate correlation assessment and exploratory data analysis
+- Descriptive analytics and trend exploration using geospatial visualisation
+- Machine learning model evaluation using error metrics such as Mean Absolute Error (MAE)
+- Forecasting of acute malnutrition cases using rolling predictions
+- Percentile-based risk classification (Normal, Alert, Alarm, Emergency)
+- Identification and mapping of malnutrition hotspots
+- Visualization of spatial and temporal risk patterns through interactive dashboards and maps
+- District-level early warning and decision-support analytics
+- Integration-ready architecture for deployment within the DHIS2 and CHAP ecosystem
 
 # System Architecture within the DHIS2 ecosystem
 
@@ -105,65 +25,66 @@ The application follows a modular workflow:
 
 Used for:
 - Forecasting future acute malnutrition cases
+- Generating three-month rolling predictions
+- Estimating temporal trends in malnutrition burden
 
 Advantages:
-- Handles non-linear relationships
-- Suitable for complex public health data
+- Captures non-linear relationships between climate, disease, and nutrition variables
+- Handles high-dimensional and complex public health datasets
+- Robust to noise and missing variability in routine data
+- Reduces overfitting through ensemble learning
 
 ## Random Forest Classifier
 
 Used for:
-- Predicting district risk levels
-
+- Classifying districts into malnutrition risk categories
+- Supporting hotspot identification and early warning analysis
+  
 Advantages:
-- Handles mixed variable types
-- Supports feature importance analysis
-- Performs well with complex interactions
+- Handles mixed variable types (continuous and categorical)
+- Supports feature importance analysis for interpretability
+- Performs well with complex variable interactions
+- Provides stable classification performance for district-level risk prediction
 
-# Data Sources
+# Data souces
 
-The system integrates multiple datasets including:
+The tool uses multiple datasets to support climate-informed malnutrition forecasting and risk classification, including:
 
-- Acute malnutrition surveillance data
-- Climate indicators
-- District metadata
-- Historical nutrition trends
+- Acute malnutrition data (SAM, MAM, and related nutrition indicators) from DHIS2
+- Climate indicators such as rainfall, temperature, and humidity from the DHIS2 Climate App
+- Environmental indicators including Standardized Precipitation Index (SPI) and Gross Primary Productivity (GPP) sourced from NASA climate datasets
+- Disease surveillance data such as malaria and diarrhoea incidence from DHIS2
+- District metadata and geographic boundaries from DHIS2
+- Population and demographic data for district-level analysis from DHIS2
 
-# Model Evaluation
+Currently, most data are extracted and prepared outside the DHIS2 platform before being imported into the forecasting tool for analysis. Once deployed within the DHIS2 ecosystem, data integration and processing will be automated through the Climate Health Analytics Platform (CHAP) to support seamless operational use.
 
-The current prototype demonstrates functional workflows for:
-- Risk classification
-- Forecasting
-- Visualization
-- Monitoring
+## Data requirements
 
-### Important Note
+The CSV should include:
 
-This system is intended as:
-- An early warning prototype
-- A decision-support tool
-- A surveillance enhancement platform
+| Column | Description |
+|---|---|
+| `Region_District` | Region and district, for example `Acholi|Agago District` |
+| `District` | District name |
+| `Region` | Region name |
+| `time_period` | Monthly date, for example `2020-01` |
+| `Acut_Malnutrition` | Acute malnutrition case count |
+| `mean_temperature` | Mean temperature |
+| `rainfall` | Rainfall |
+| `mean_relative_humidity` | Relative humidity |
+| `average_gpp` | Vegetation productivity |
+| `malaria_confirmed` | Confirmed malaria cases |
+| `pneumonia_cases` | Pneumonia cases |
+| `pregnant_women_with_Anaemia` | Anaemia cases among pregnant women |
+| `diarrhea_acute` | Acute diarrhoea cases |
+| `low_birth_weight_babies` | Low birth weight babies |
+| `diarrhea_persistent` | Persistent diarrhoea cases |
+| `population` | District population |
 
+## Metadata requirements
 
-# Intended Users
-
-The platform may support:
-- Ministry of Health programs
-- Nutrition surveillance teams
-- Humanitarian organisations
-- Public health analysts
-- District health offices
-
-The app combines:
-
-- district-based acute malnutrition risk classification;
-- within-district and between-district percentile risk thresholds;
-- Random Forest regression for 3-month case forecasting;
-- Random Forest classification for risk evaluation;
-- Spearman correlation analysis using radial visualizations;
-- district and region comparison charts;
-- historical risk trend monitoring;
-- district GeoJSON risk maps.
+Upload a district GeoJSON in the sidebar. Select the GeoJSON column containing district names. The app matches those names to the CSV district names.
 
 ## App Screens
 
@@ -206,42 +127,6 @@ District-level Spearman correlation portrait for Karaeng District, showing local
 ![Forecast Between-Districts Risk](Screenshots/Screenshot7.png)
 
 
-## Data Requirements
-
-The CSV should include:
-
-| Column | Description |
-|---|---|
-| `Region_District` | Region and district, for example `Acholi|Agago District` |
-| `District` | District name |
-| `Region` | Region name |
-| `time_period` | Monthly date, for example `2020-01` |
-| `Acut_Malnutrition` | Acute malnutrition case count |
-| `mean_temperature` | Mean temperature |
-| `rainfall` | Rainfall |
-| `mean_relative_humidity` | Relative humidity |
-| `average_gpp` | Vegetation productivity |
-| `malaria_confirmed` | Confirmed malaria cases |
-| `pneumonia_cases` | Pneumonia cases |
-| `pregnant_women_with_Anaemia` | Anaemia cases among pregnant women |
-| `diarrhea_acute` | Acute diarrhoea cases |
-| `low_birth_weight_babies` | Low birth weight babies |
-| `diarrhea_persistent` | Persistent diarrhoea cases |
-| `population` | District population |
-
----
-
-## GeoJSON Requirements
-
-Upload a district GeoJSON in the sidebar. Select the GeoJSON column containing district names. The app matches those names to the CSV district names.
-
----
-
 ## Author
 
 Sarah Awino
-'''
-with open('/Users/sarahawino/Documents/New project/acute-malnutrition-early-warning/README.md', 'w') as f:
-    f.write(content)
-print("Done")
-EOF
