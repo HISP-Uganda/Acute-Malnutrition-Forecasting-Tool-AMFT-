@@ -1357,8 +1357,8 @@ def render_delta_map(gdf, fc_map, risk_col, months):
 # =============================================================================
 
 def main():
-    st.set_page_config(page_title="Acute Malnutrition Early Warning", layout="wide")
-    st.title("Acute Malnutrition Early Warning System")
+    st.set_page_config(page_title="ACUTE MALNUTRITION FORECASTING TOOL (AMFT)", layout="wide")
+    st.title("ACUTE MALNUTRITION FORECASTING TOOL (AMFT)")
     st.caption("District-based risk mapping, Random Forest regression forecast, and recall-focused classification")
 
     with st.sidebar:
