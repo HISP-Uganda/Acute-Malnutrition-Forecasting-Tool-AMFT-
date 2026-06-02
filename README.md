@@ -104,7 +104,7 @@ pip install streamlit
 Start the Streamlit application:
 
 ```bash
-streamlit run app.py
+streamlit run streamlit_app.py
 ```
 
 The application will open automatically in your browser.
