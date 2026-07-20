@@ -8,18 +8,6 @@ The current version focuses on three connected outputs:
 - 3-level operational alerts derived from anomaly combinations
 - 3-month district forecasts of GAM caseloads with uncertainty bounds
 
-## What Changed in the Current Tool
-
-The README has been updated to reflect the current app behavior. The tool now uses:
-
-- anomaly levels of `Low`, `Moderate`, `High`, and `Extreme`
-- operational alerts of `Monitor`, `Alert`, and `Respond`
-- 3-month recursive forecasting with `Lower_80` and `Upper_80` intervals
-- district filtering across the full app
-- observed and forecast map views for anomalies and operational alerts
-- built-in data quality summaries for districts and months
-- classification and regression model checks inside the app
-- optional IPC AMN severity labeling when direct GAM prevalence columns are available
 
 ## Core Capabilities
 
