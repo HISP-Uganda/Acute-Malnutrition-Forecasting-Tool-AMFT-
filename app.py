@@ -1,4 +1,4 @@
-#  1. Setup and helper functions
+# 1. Setup and helper functions
 # 2. Data loading and quality checks
 # 3. Anomaly and operational alert rules
 # 4. Target preparation and feature engineering
@@ -6,12 +6,14 @@
 # 6. Forecasting and uncertainty
 # 7. Analysis and geospatial visualization
 # 8. Application flow and user outputs
-# Related helpers may appear before the main block for their group.
+# Functions and classes are grouped in the walkthrough order below.
+
 
 # =============================================================================
 # SECTION 1. SETUP AND HELPER FUNCTIONS
-# Libraries, input paths, covariates, labels, colours, and shared helpers.
 # =============================================================================
+# Libraries, input paths, covariates, labels, colours, and shared helpers.
+
 
 import calendar
 import hashlib
@@ -233,6 +235,7 @@ _EXCLUDE_FROM_FEATURES = {
 # Fixed-order risk encoding
 # =============================================================================
 
+
 class RiskLabelEncoder:
     """Fixed-order encoder. sklearn LabelEncoder sorts alphabetically."""
 
@@ -246,8 +249,9 @@ class RiskLabelEncoder:
 
 
 # =============================================================================
-# Shared date, display, and summary helpers
+# Shared date, column, file, and display helpers
 # =============================================================================
+
 
 def parse_date(s: str) -> pd.Timestamp:
     s = str(s).strip()
@@ -271,106 +275,337 @@ def rename_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={c: display_label(c) for c in df.columns})
 
 
-def build_district_forecast_table(fc_df: pd.DataFrame, forecast_months, include_details: bool = False) -> pd.DataFrame:
-    """Show the common forecast horizon in one row per district."""
-    months = pd.DatetimeIndex(forecast_months).to_period("M")
-    metrics = {
-        "Predicted": "Forecast",
-        "Operational_Alert": "Alert",
+def normalise_col_name(name: str) -> str:
+    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+
+
+def find_matching_col(columns: list[str], aliases: list[str]) -> str | None:
+    norm_map = {normalise_col_name(col): col for col in columns}
+    for alias in aliases:
+        col = norm_map.get(alias)
+        if col is not None:
+            return col
+    return None
+
+
+def file_hash(file_bytes: bytes) -> str:
+    return hashlib.md5(file_bytes).hexdigest()
+
+
+def colour_risk_df(df_styler, columns):
+    risk_bg = {
+        "Low": RISK_COLORS["Low"],
+        "Moderate": RISK_COLORS["Moderate"],
+        "High": RISK_COLORS["High"],
+        "Extreme": RISK_COLORS["Extreme"],
+        "Monitor": RISK_COLORS["Monitor"],
+        "Alert": RISK_COLORS["Alert"],
+        "Respond": RISK_COLORS["Respond"],
+        "Extremely Critical": "#f5c6cb",
+        "Critical": "#f8d7da",
+        "Serious": "#fde8d0",
+        "Acceptable": "#d4edda",
+        "No Data": "#f0f0f0",
     }
-    if include_details:
-        metrics.update({
-            "Lower_80": "Lower 80%",
-            "Upper_80": "Upper 80%",
-            "WD_Risk": "Within Anomaly",
-            "XD_Risk": "Between Anomaly",
-            "Operational_Alert_Why": "Alert Reason",
-        })
-    if fc_df.empty:
-        return pd.DataFrame(columns=["District"] + [
-            f"{month.strftime('%b %Y')} {label}" for label in metrics.values() for month in months
-        ])
+    risk_fg = {
+        "Low": "#0b2e13",
+        "Moderate": "#4d3d00",
+        "High": "#ffffff",
+        "Extreme": "#ffffff",
+        "Monitor": "#0b2e13",
+        "Alert": "#4d3d00",
+        "Respond": "#ffffff",
+        "Extremely Critical": "#58151c",
+        "Critical": "#721c24",
+        "Serious": "#8a4500",
+        "Acceptable": "#155724",
+        "No Data": "#555",
+    }
 
-    data = fc_df.copy()
-    data["Forecast_Month"] = pd.to_datetime(data["Date"]).dt.to_period("M")
-    available = [metric for metric in metrics if metric in data.columns]
-    pivot = data.pivot(index="District", columns="Forecast_Month", values=available)
-    summary = pd.DataFrame(index=pivot.index)
-    for metric in available:
-        values = pivot[metric].reindex(columns=months)
-        for month in months:
-            column = values[month]
-            if metric in {"Predicted", "Lower_80", "Upper_80"}:
-                column = column.astype("Int64")
-            elif metric in {"Operational_Alert", "WD_Risk", "XD_Risk"}:
-                column = column.fillna("No Data")
+    def _style(val):
+        if val in risk_bg:
+            return f"background-color:{risk_bg[val]};color:{risk_fg[val]};font-weight:bold"
+        return ""
+
+    return df_styler.map(_style, subset=columns)
+
+
+def colour_alert_summary_df(df: pd.DataFrame):
+    risk_bg = {
+        "Low": RISK_COLORS["Low"],
+        "Moderate": RISK_COLORS["Moderate"],
+        "High": RISK_COLORS["High"],
+        "Extreme": RISK_COLORS["Extreme"],
+        "Monitor": RISK_COLORS["Monitor"],
+        "Alert": RISK_COLORS["Alert"],
+        "Respond": RISK_COLORS["Respond"],
+        "No Data": "#f0f0f0",
+    }
+    risk_fg = {
+        "Low": "#0b2e13",
+        "Moderate": "#4d3d00",
+        "High": "#ffffff",
+        "Extreme": "#ffffff",
+        "Monitor": "#0b2e13",
+        "Alert": "#4d3d00",
+        "Respond": "#ffffff",
+        "No Data": "#555",
+    }
+
+    def _style_row(row):
+        level = row.get("Level", row.get("Anomaly Level", row.get("Operational Alert")))
+        if level in risk_bg:
+            style = f"background-color:{risk_bg[level]};color:{risk_fg[level]};font-weight:bold"
+            return [style] * len(row)
+        return [""] * len(row)
+
+    return df.style.apply(_style_row, axis=1)
+
+
+# =============================================================================
+# SECTION 2. DATA LOADING AND QUALITY CHECKS
+# =============================================================================
+# Read inputs, retain the shared cutoff, and summarize quality and methodology.
+
+
+# =============================================================================
+# CSV loading and observation preparation
+# =============================================================================
+
+
+@st.cache_data(show_spinner=False)
+def load_data_from_bytes(file_bytes: bytes, _hash: str) -> pd.DataFrame:
+    content = file_bytes.decode("utf-8")
+    return load_data_from_df(pd.read_csv(StringIO(content)))
+
+
+@st.cache_data(show_spinner=False)
+def load_data_from_path(path: str) -> pd.DataFrame:
+    return load_data_from_df(pd.read_csv(path))
+
+
+def load_data_from_df(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["time_period", "Acut_Malnutrition", "Region_District"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    df["Date"] = df["time_period"].apply(parse_date)
+    # Keep the source cutoff even when the latest month has missing caseloads.
+    forecast_cutoff = df["Date"].max()
+    df = df.dropna(subset=["Date", "Acut_Malnutrition"]).copy()
+
+    raw_rd = df["Region_District"].astype(str).str.strip()
+    df["Region_District"] = raw_rd
+
+    if "District" in df.columns:
+        df["District_Name"] = df["District"].astype(str).str.strip()
+    else:
+        df["District_Name"] = raw_rd.str.split("|").str[-1].str.strip()
+
+    has_pipe = raw_rd.str.contains("|", regex=False)
+    df["Region_Label"] = ""
+    df.loc[has_pipe, "Region_Label"] = raw_rd[has_pipe].str.split("|").str[0].str.strip()
+    if "Region" in df.columns:
+        df.loc[~has_pipe, "Region_Label"] = df.loc[~has_pipe, "Region"].astype(str).str.strip()
+    else:
+        df.loc[~has_pipe, "Region_Label"] = "Unknown"
+
+    df["Display_Name"] = df["Region_Label"] + " - " + df["District_Name"]
+    df = df.sort_values(["District_Name", "Date"]).reset_index(drop=True)
+
+    severity_setup = get_severity_setup(df)
+    df["Severity_Basis"] = severity_setup["basis"]
+    df["Severity_Prevalence_Pct"] = np.nan
+    df["Severity_Phase"] = "No Data"
+    df["Caseload_per_100000_Pop"] = np.nan
+    df["Denominator_Source"] = get_denominator_source_label(severity_setup)
+    df["Operational_Alert"] = "No Data"
+    df["Operational_Alert_Why"] = ""
+
+    if severity_setup["population_col"] is not None:
+        total_pop = pd.to_numeric(df[severity_setup["population_col"]], errors="coerce").replace(0, np.nan)
+        df["Caseload_per_100000_Pop"] = pd.to_numeric(df["Acut_Malnutrition"], errors="coerce") / total_pop * 100000
+
+    if severity_setup["observed_method"] in {"gam_whz", "gam_muac"}:
+        prevalence = pd.to_numeric(df[severity_setup["prevalence_col"]], errors="coerce")
+        df["Severity_Prevalence_Pct"] = prevalence
+        df["Severity_Phase"] = prevalence.apply(classify_ipc_amn_phase)
+
+    df[["wd_p50", "wd_p75", "wd_p90", "wd_p95"]] = np.nan
+    df["wd_risk"] = "No Data"
+
+    for district in df["District_Name"].unique():
+        mask = df["District_Name"] == district
+        d = df[mask].sort_values("Date")
+        for idx in d.index:
+            past = d.loc[d["Date"] < df.loc[idx, "Date"], "Acut_Malnutrition"]
+            if len(past) >= 2:
+                p50, p75, p90, p95 = np.percentile(past, [50, 75, 90, 95])
             else:
-                column = column.fillna("")
-            summary[f"{month.strftime('%b %Y')} {metrics[metric]}"] = column
-    return summary.reset_index()
+                v = df.loc[idx, "Acut_Malnutrition"]
+                p50 = p75 = p90 = p95 = v
+            df.loc[idx, ["wd_p50", "wd_p75", "wd_p90", "wd_p95"]] = p50, p75, p90, p95
+            df.loc[idx, "wd_risk"] = classify_risk(df.loc[idx, "Acut_Malnutrition"], p50, p75, p90, p95)
 
+    df[["xd_p50", "xd_p75", "xd_p90", "xd_p95"]] = np.nan
+    df["xd_risk"] = "No Data"
 
-def build_phase_count_table(values: pd.Series, levels: list[str] | None = None, label: str = "Classification") -> pd.DataFrame:
-    levels = levels or RISK_LEVELS
-    counts = values.value_counts().reindex(levels).fillna(0).astype(int).reset_index()
-    counts.columns = [label, "District Count"]
-    return counts
+    for date in sorted(df["Date"].unique()):
+        month = date.month
+        curr_idx = df[df["Date"] == date].index
+        past_all = df[df["Date"] < date]
 
+        hist = past_all[past_all["Date"].dt.month == month]["Acut_Malnutrition"]
+        if len(hist) < 3:
+            season_months = [(month - 1) % 12 + 1, month, month % 12 + 1]
+            hist = past_all[past_all["Date"].dt.month.isin(season_months)]["Acut_Malnutrition"]
+        if len(hist) < 3:
+            hist = past_all["Acut_Malnutrition"]
+        if len(hist) < 3:
+            hist = df["Acut_Malnutrition"]
 
-def render_phase_pie_chart(counts: pd.DataFrame, level_col: str = "Level"):
-    chart_df = counts[counts["District Count"] > 0].copy()
-    if chart_df.empty:
-        st.info("No districts in the current selection.")
-        return
+        p50, p75, p90, p95 = np.percentile(hist, [50, 75, 90, 95])
+        for idx in curr_idx:
+            val = df.loc[idx, "Acut_Malnutrition"]
+            df.loc[idx, ["xd_p50", "xd_p75", "xd_p90", "xd_p95"]] = p50, p75, p90, p95
+            df.loc[idx, "xd_risk"] = classify_risk(val, p50, p75, p90, p95)
 
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=chart_df[level_col],
-                values=chart_df["District Count"],
-                hole=0.35,
-                sort=False,
-                marker=dict(colors=[RISK_COLORS.get(level, "#bdbdbd") for level in chart_df[level_col]]),
-                textinfo="label+percent",
-                hovertemplate="%{label}: %{value} districts (%{percent})<extra></extra>",
-            )
-        ]
+    df["wd_score"] = df["wd_risk"].map(RISK_ORDER).fillna(0).astype(int)
+    df["xd_score"] = df["xd_risk"].map(RISK_ORDER).fillna(0).astype(int)
+    df["Operational_Alert"] = df.apply(
+        lambda row: derive_operational_alert(
+            row["wd_risk"],
+            row["xd_risk"],
+            row["Severity_Phase"],
+        ),
+        axis=1,
     )
-    fig.update_layout(
-        height=320,
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+    df["Operational_Alert_Why"] = df.apply(
+        lambda row: explain_operational_alert(
+            row["wd_risk"],
+            row["xd_risk"],
+            row["Severity_Phase"],
+        ),
+        axis=1,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    df["month"] = df["Date"].dt.month
+    df["quarter"] = df["Date"].dt.quarter
+    df.attrs["forecast_cutoff"] = forecast_cutoff
+
+    return df.reset_index(drop=True)
 
 
-def build_alert_comparison_table(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for level in RISK_LEVELS:
-        rows.append({
-            "Indicator": "Within-District Anomaly",
-            "Level": level,
-            "District Count": int(df["wd_risk"].value_counts().reindex(RISK_LEVELS).fillna(0).get(level, 0)),
-        })
-    for level in RISK_LEVELS:
-        rows.append({
-            "Indicator": "Between-Districts Anomaly",
-            "Level": level,
-            "District Count": int(df["xd_risk"].value_counts().reindex(RISK_LEVELS).fillna(0).get(level, 0)),
-        })
-    for level in OPERATIONAL_ALERT_LEVELS:
-        rows.append({
-            "Indicator": "Operational Alert",
-            "Level": level,
-            "District Count": int(df["Operational_Alert"].value_counts().reindex(OPERATIONAL_ALERT_LEVELS).fillna(0).get(level, 0)),
-        })
+# =============================================================================
+# Methodology and data quality summaries
+# =============================================================================
+
+
+def build_methodology_df(df: pd.DataFrame) -> pd.DataFrame:
+    severity_setup = get_severity_setup(df)
+    rows = [
+        {
+            "Component": "Outcome",
+            "Definition": "GAM caseload from `Acut_Malnutrition`, interpreted as SAM + MAM.",
+        },
+        {
+            "Component": "Within-district anomaly",
+            "Definition": "Compares each district with its own historical distribution.",
+        },
+        {
+            "Component": "Between-districts anomaly",
+            "Definition": "Compares districts against peer and seasonal historical patterns.",
+        },
+        {
+            "Component": "Operational alert",
+            "Definition": "Uses a fixed combination rule based on within-district and between-district anomaly levels.",
+        },
+        {
+            "Component": "Data note",
+            "Definition": severity_setup["note"],
+        },
+    ]
     return pd.DataFrame(rows)
+
+
+def _count_iqr_outliers(values: pd.Series) -> int:
+    vals = pd.to_numeric(values, errors="coerce").dropna()
+    if len(vals) < 4:
+        return 0
+    q1, q3 = np.percentile(vals, [25, 75])
+    iqr = q3 - q1
+    if iqr <= 0:
+        return 0
+    upper = q3 + 1.5 * iqr
+    return int((vals > upper).sum())
+
+
+def compute_data_quality_tables(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    severity_setup = get_severity_setup(df)
+    pop_col = severity_setup["population_col"]
+    districts = sorted(df["District_Name"].unique())
+    expected_months = len(pd.period_range(df["Date"].min(), df["Date"].max(), freq="M"))
+    total_districts = len(districts)
+
+    district_rows = []
+    for district in districts:
+        d = df[df["District_Name"] == district].sort_values("Date")
+        pop_missing = 0
+        if pop_col is not None and pop_col in d.columns:
+            pop_missing = int(pd.to_numeric(d[pop_col], errors="coerce").isna().sum())
+
+        district_rows.append({
+            "District": district,
+            "Months_Reported": int(d["Date"].nunique()),
+            "Completeness_Pct": round(d["Date"].nunique() / expected_months * 100, 1) if expected_months else np.nan,
+            "Zero_GAM_Months": int((pd.to_numeric(d["Acut_Malnutrition"], errors="coerce").fillna(0) == 0).sum()),
+            "Outlier_GAM_Months": _count_iqr_outliers(d["Acut_Malnutrition"]),
+            "Missing_Population": pop_missing,
+            "Missing_Severity": int(d["Severity_Prevalence_Pct"].isna().sum()),
+            "Denominator_Source": d["Denominator_Source"].iloc[0] if "Denominator_Source" in d.columns and not d.empty else "Unavailable",
+        })
+
+    district_quality = pd.DataFrame(district_rows).sort_values(
+        ["Completeness_Pct", "Missing_Severity", "Outlier_GAM_Months"],
+        ascending=[True, False, False],
+    ).reset_index(drop=True)
+
+    monthly = (
+        df.groupby("Date")
+        .agg(
+            Districts_Reported=("District_Name", "nunique"),
+            Total_GAM_Caseload=("Acut_Malnutrition", "sum"),
+            Zero_GAM_Districts=("Acut_Malnutrition", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) == 0).sum())),
+            Missing_Severity=("Severity_Prevalence_Pct", lambda s: int(s.isna().sum())),
+        )
+        .reset_index()
+        .sort_values("Date")
+    )
+    monthly["Reporting_Completeness_Pct"] = (monthly["Districts_Reported"] / total_districts * 100).round(1) if total_districts else np.nan
+    monthly["Date"] = monthly["Date"].dt.strftime("%Y-%m")
+
+    duplicate_rows = int(df.duplicated(subset=["District_Name", "Date"]).sum())
+    summary = {
+        "expected_months": expected_months,
+        "median_completeness": float(district_quality["Completeness_Pct"].median()) if not district_quality.empty else 0.0,
+        "zero_gam_months": int(district_quality["Zero_GAM_Months"].sum()) if not district_quality.empty else 0,
+        "outlier_gam_months": int(district_quality["Outlier_GAM_Months"].sum()) if not district_quality.empty else 0,
+        "missing_severity_rows": int(df["Severity_Prevalence_Pct"].isna().sum()),
+        "duplicate_rows": duplicate_rows,
+    }
+    return summary, district_quality, monthly
 
 
 # =============================================================================
 # SECTION 3. ANOMALY AND OPERATIONAL ALERT RULES
-# Percentile anomaly levels, alert combinations, explanations, and optional severity.
 # =============================================================================
+# Percentile anomaly levels, alert combinations, explanations, and optional severity.
+
+
+# =============================================================================
+# Anomaly and severity classification
+# =============================================================================
+
 
 def ordered_levels_for_col(col: str) -> list[str]:
     if col in {"Operational_Alert", "Composite_Risk"}:
@@ -424,6 +659,11 @@ def severity_score(label: str) -> int:
         "Critical": 3,
         "Extremely Critical": 3,
     }.get(label, -1)
+
+
+# =============================================================================
+# Operational alert rules and compatibility helpers
+# =============================================================================
 
 
 def derive_operational_alert(
@@ -527,17 +767,54 @@ def ensure_forecast_alert_columns(fc_df: pd.DataFrame) -> pd.DataFrame:
     return fc_df
 
 
-def normalise_col_name(name: str) -> str:
-    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+def build_alert_actions_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "Anomaly Level": "Low",
+            "Percentile": "<75th percentile",
+            "Interpretation": "Within the usual range",
+        },
+        {
+            "Anomaly Level": "Moderate",
+            "Percentile": "75th-<90th percentile",
+            "Interpretation": "Higher than usual",
+        },
+        {
+            "Anomaly Level": "High",
+            "Percentile": "90th-<95th percentile",
+            "Interpretation": "Unusually high",
+        },
+        {
+            "Anomaly Level": "Extreme",
+            "Percentile": ">=95th percentile",
+            "Interpretation": "Exceptionally high",
+        },
+    ])
 
 
-def find_matching_col(columns: list[str], aliases: list[str]) -> str | None:
-    norm_map = {normalise_col_name(col): col for col in columns}
-    for alias in aliases:
-        col = norm_map.get(alias)
-        if col is not None:
-            return col
-    return None
+def build_operational_alert_rules_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "Operational Alert": "Monitor",
+            "Combination Rule": "Within = Low AND Between = (Low OR Moderate)",
+            "Action": "Routine monitoring",
+        },
+        {
+            "Operational Alert": "Alert",
+            "Combination Rule": "Within = Low AND Between = (High OR Extreme), OR Within = Moderate AND Between = (Low OR Moderate)",
+            "Action": "Heightened surveillance",
+        },
+        {
+            "Operational Alert": "Respond",
+            "Combination Rule": "Within = High OR Extreme, OR Within = Moderate AND Between = (High OR Extreme)",
+            "Action": "Immediate response",
+        },
+    ])
+
+
+# =============================================================================
+# Optional prevalence and population setup
+# =============================================================================
 
 
 def get_severity_setup(df: pd.DataFrame) -> dict:
@@ -585,10 +862,6 @@ def get_severity_setup(df: pd.DataFrame) -> dict:
     }
 
 
-def file_hash(file_bytes: bytes) -> str:
-    return hashlib.md5(file_bytes).hexdigest()
-
-
 def get_denominator_source_label(severity_setup: dict) -> str:
     method = severity_setup["observed_method"]
     if method == "gam_whz":
@@ -606,154 +879,15 @@ def get_denominator_source_short(severity_setup: dict) -> str:
 
 
 # =============================================================================
-# SECTION 2. DATA LOADING AND QUALITY CHECKS (SUMMARIES)
-# Explain methodology and report completeness, duplicates, missingness, and outliers.
+# SECTION 4. TARGET PREPARATION AND FEATURE ENGINEERING
 # =============================================================================
-
-def build_methodology_df(df: pd.DataFrame) -> pd.DataFrame:
-    severity_setup = get_severity_setup(df)
-    rows = [
-        {
-            "Component": "Outcome",
-            "Definition": "GAM caseload from `Acut_Malnutrition`, interpreted as SAM + MAM.",
-        },
-        {
-            "Component": "Within-district anomaly",
-            "Definition": "Compares each district with its own historical distribution.",
-        },
-        {
-            "Component": "Between-districts anomaly",
-            "Definition": "Compares districts against peer and seasonal historical patterns.",
-        },
-        {
-            "Component": "Operational alert",
-            "Definition": "Uses a fixed combination rule based on within-district and between-district anomaly levels.",
-        },
-        {
-            "Component": "Data note",
-            "Definition": severity_setup["note"],
-        },
-    ]
-    return pd.DataFrame(rows)
-
-
-def build_alert_actions_df() -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "Anomaly Level": "Low",
-            "Percentile": "<75th percentile",
-            "Interpretation": "Within the usual range",
-        },
-        {
-            "Anomaly Level": "Moderate",
-            "Percentile": "75th-<90th percentile",
-            "Interpretation": "Higher than usual",
-        },
-        {
-            "Anomaly Level": "High",
-            "Percentile": "90th-<95th percentile",
-            "Interpretation": "Unusually high",
-        },
-        {
-            "Anomaly Level": "Extreme",
-            "Percentile": ">=95th percentile",
-            "Interpretation": "Exceptionally high",
-        },
-    ])
-
-
-def build_operational_alert_rules_df() -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "Operational Alert": "Monitor",
-            "Combination Rule": "Within = Low AND Between = (Low OR Moderate)",
-            "Action": "Routine monitoring",
-        },
-        {
-            "Operational Alert": "Alert",
-            "Combination Rule": "Within = Low AND Between = (High OR Extreme), OR Within = Moderate AND Between = (Low OR Moderate)",
-            "Action": "Heightened surveillance",
-        },
-        {
-            "Operational Alert": "Respond",
-            "Combination Rule": "Within = High OR Extreme, OR Within = Moderate AND Between = (High OR Extreme)",
-            "Action": "Immediate response",
-        },
-    ])
-
-
-def _count_iqr_outliers(values: pd.Series) -> int:
-    vals = pd.to_numeric(values, errors="coerce").dropna()
-    if len(vals) < 4:
-        return 0
-    q1, q3 = np.percentile(vals, [25, 75])
-    iqr = q3 - q1
-    if iqr <= 0:
-        return 0
-    upper = q3 + 1.5 * iqr
-    return int((vals > upper).sum())
-
-
-def compute_data_quality_tables(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
-    severity_setup = get_severity_setup(df)
-    pop_col = severity_setup["population_col"]
-    districts = sorted(df["District_Name"].unique())
-    expected_months = len(pd.period_range(df["Date"].min(), df["Date"].max(), freq="M"))
-    total_districts = len(districts)
-
-    district_rows = []
-    for district in districts:
-        d = df[df["District_Name"] == district].sort_values("Date")
-        pop_missing = 0
-        if pop_col is not None and pop_col in d.columns:
-            pop_missing = int(pd.to_numeric(d[pop_col], errors="coerce").isna().sum())
-
-        district_rows.append({
-            "District": district,
-            "Months_Reported": int(d["Date"].nunique()),
-            "Completeness_Pct": round(d["Date"].nunique() / expected_months * 100, 1) if expected_months else np.nan,
-            "Zero_GAM_Months": int((pd.to_numeric(d["Acut_Malnutrition"], errors="coerce").fillna(0) == 0).sum()),
-            "Outlier_GAM_Months": _count_iqr_outliers(d["Acut_Malnutrition"]),
-            "Missing_Population": pop_missing,
-            "Missing_Severity": int(d["Severity_Prevalence_Pct"].isna().sum()),
-            "Denominator_Source": d["Denominator_Source"].iloc[0] if "Denominator_Source" in d.columns and not d.empty else "Unavailable",
-        })
-
-    district_quality = pd.DataFrame(district_rows).sort_values(
-        ["Completeness_Pct", "Missing_Severity", "Outlier_GAM_Months"],
-        ascending=[True, False, False],
-    ).reset_index(drop=True)
-
-    monthly = (
-        df.groupby("Date")
-        .agg(
-            Districts_Reported=("District_Name", "nunique"),
-            Total_GAM_Caseload=("Acut_Malnutrition", "sum"),
-            Zero_GAM_Districts=("Acut_Malnutrition", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0) == 0).sum())),
-            Missing_Severity=("Severity_Prevalence_Pct", lambda s: int(s.isna().sum())),
-        )
-        .reset_index()
-        .sort_values("Date")
-    )
-    monthly["Reporting_Completeness_Pct"] = (monthly["Districts_Reported"] / total_districts * 100).round(1) if total_districts else np.nan
-    monthly["Date"] = monthly["Date"].dt.strftime("%Y-%m")
-
-    duplicate_rows = int(df.duplicated(subset=["District_Name", "Date"]).sum())
-    summary = {
-        "expected_months": expected_months,
-        "median_completeness": float(district_quality["Completeness_Pct"].median()) if not district_quality.empty else 0.0,
-        "zero_gam_months": int(district_quality["Zero_GAM_Months"].sum()) if not district_quality.empty else 0,
-        "outlier_gam_months": int(district_quality["Outlier_GAM_Months"].sum()) if not district_quality.empty else 0,
-        "missing_severity_rows": int(df["Severity_Prevalence_Pct"].isna().sum()),
-        "duplicate_rows": duplicate_rows,
-    }
-    return summary, district_quality, monthly
+# Transform the GAM case-count target and build historical predictors.
 
 
 # =============================================================================
-# SECTION 4. TARGET PREPARATION AND FEATURE ENGINEERING (HELPERS)
-# Log and inverse transformations used by the case-count model.
+# Log and inverse transformations
 # =============================================================================
+
 
 def apply_log_transform(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     df = df.copy()
@@ -775,105 +909,290 @@ def inverse_regression_target(values: float | np.ndarray, scaler: dict) -> float
     return restored
 
 
-def guess_name_col(columns: list[str]) -> str:
-    keywords = ["district", "dist", "name", "admin", "adm"]
-    non_geom = [c for c in columns if c != "geometry"]
-    for kw in keywords:
-        for col in non_geom:
-            if kw in col.lower():
-                return col
-    return non_geom[0] if non_geom else ""
+# =============================================================================
+# Historical feature construction
+# =============================================================================
 
 
-def safe_geojson(gdf: gpd.GeoDataFrame) -> dict:
-    g = gdf.copy()
-    g["geometry"] = g["geometry"].simplify(0.01, preserve_topology=True)
-    for col in g.columns:
-        if col == "geometry":
-            continue
-        if pd.api.types.is_datetime64_any_dtype(g[col]):
-            g[col] = g[col].astype(str)
-        elif g[col].dtype == object:
-            g[col] = g[col].fillna("Unknown").astype(str)
-        elif pd.api.types.is_float_dtype(g[col]):
-            g[col] = g[col].fillna(0).replace([np.inf, -np.inf], 0)
-    return json.loads(g.to_json(na="drop", show_bbox=False))
+# Removed lower-importance / redundant engineered features:
+# Lag2_Z, Lag3_Z, Roll6_Max, Roll12_Mean, Roll12_Max, Trend, Acceleration,
+# Hist_P75, Lag1_Over_P75, Lag1_Over_P90, Lag1_Ratio_P75, Lag1_Ratio_P90.
+# Hist_P90 is retained because it helps separate High from Extreme conditions.
 
+@st.cache_data(show_spinner=False)
+def build_features(df: pd.DataFrame):
+    records = []
 
-def colour_risk_df(df_styler, columns):
-    risk_bg = {
-        "Low": RISK_COLORS["Low"],
-        "Moderate": RISK_COLORS["Moderate"],
-        "High": RISK_COLORS["High"],
-        "Extreme": RISK_COLORS["Extreme"],
-        "Monitor": RISK_COLORS["Monitor"],
-        "Alert": RISK_COLORS["Alert"],
-        "Respond": RISK_COLORS["Respond"],
-        "Extremely Critical": "#f5c6cb",
-        "Critical": "#f8d7da",
-        "Serious": "#fde8d0",
-        "Acceptable": "#d4edda",
-        "No Data": "#f0f0f0",
+    for district in df["District_Name"].unique():
+        d = df[df["District_Name"] == district].sort_values("Date").reset_index(drop=True)
+        adm = d["Acut_Malnutrition"].astype(float).values
+
+        for i in range(3, len(d)):
+            hist = adm[:i]
+            roll3 = adm[i - 3:i]
+            roll6 = adm[max(0, i - 6):i]
+
+            hist_mu = float(np.mean(hist))
+            hist_sd = float(np.std(hist)) if np.std(hist) > 1e-6 else 1.0
+            hist_p90, hist_p95 = np.percentile(hist, [90, 95])
+
+            lag1 = float(adm[i - 1])
+            lag2 = float(adm[i - 2])
+            lag3 = float(adm[i - 3])
+
+            same_month_hist = d.loc[
+                (d.index < i) & (d["Date"].dt.month == d.loc[i, "Date"].month),
+                "Acut_Malnutrition",
+            ].astype(float)
+            seasonal_lag_12 = float(same_month_hist.iloc[-1]) if len(same_month_hist) else lag1
+
+            recent_scores = d.loc[i - 3:i - 1, "wd_score"].astype(float).values
+            recent_high = np.isin(recent_scores, [2, 3]).sum()
+
+            row = {
+                "District": district,
+                "Date": d.loc[i, "Date"],
+                # Calendar
+                "Month": d.loc[i, "Date"].month,
+                "Quarter": d.loc[i, "Date"].quarter,
+                "Month_Sin": np.sin(2 * np.pi * d.loc[i, "Date"].month / 12),
+                "Month_Cos": np.cos(2 * np.pi * d.loc[i, "Date"].month / 12),
+                # Raw lags
+                "Lag1": lag1,
+                "Lag2": lag2,
+                "Lag3": lag3,
+                # Standardised lag
+                "Lag1_Z": (lag1 - hist_mu) / hist_sd,
+                # Rolling windows
+                "Roll3_Mean": float(np.mean(roll3)),
+                "Roll3_Std": float(np.std(roll3)),
+                "Roll6_Mean": float(np.mean(roll6)),
+                # Seasonal reference
+                "Seasonal_Lag12": seasonal_lag_12,
+                # Historical distribution
+                "Hist_Mean": hist_mu,
+                "Hist_Std": hist_sd,
+                "Hist_P90": hist_p90,
+                "Hist_P95": hist_p95,
+                # Threshold exceedance / ratio
+                "Lag1_Over_P95": lag1 - hist_p95,
+                "Lag1_Ratio_P95": lag1 / (hist_p95 + 1e-6),
+                # Risk history
+                "Recent_WD_High_Count": recent_high,
+                "WD_Score_Lag": d.loc[i - 1, "wd_score"],
+                "XD_Score_Lag": d.loc[i - 1, "xd_score"],
+                "Target_Adm": adm[i],
+                "Target_WD_Risk": d.loc[i, "wd_risk"],
+                "Target_XD_Risk": d.loc[i, "xd_risk"],
+            }
+
+            # Passthrough numeric covariates, lagged by one month.
+            for col in d.columns:
+                if col not in row and col not in _EXCLUDE_FROM_FEATURES:
+                    if pd.api.types.is_numeric_dtype(d[col]):
+                        row[col] = d.loc[i - 1, col]
+
+            records.append(row)
+
+    feat_df = pd.DataFrame(records).dropna().reset_index(drop=True)
+    feat_df = apply_log_transform(feat_df, SKEWED_COVS)
+
+    scale_cols = [
+        "Lag1", "Lag2", "Lag3",
+        "Roll3_Mean", "Roll6_Mean",
+        "Seasonal_Lag12",
+        "Hist_Mean", "Hist_Std",
+        "Hist_P90", "Hist_P95",
+        "Lag1_Over_P95",
+    ]
+
+    scalers = {}
+    feat_df["Target_Adm_Transformed"] = np.nan
+    for district in feat_df["District"].unique():
+        mask = feat_df["District"] == district
+        baseline = feat_df.loc[mask, "Lag1"].astype(float)
+        feature_mu = float(baseline.mean())
+        feature_std = float(baseline.std())
+        # Sample standard deviation is NaN when only one usable row remains.
+        if not np.isfinite(feature_std) or feature_std < 1e-6:
+            feature_std = 1.0
+
+        target_log = transform_regression_target(feat_df.loc[mask, "Target_Adm"].astype(float))
+        target_mu = float(target_log.mean())
+        target_std = float(target_log.std())
+        if not np.isfinite(target_std) or target_std < 1e-6:
+            target_std = 1.0
+
+        scalers[district] = {
+            "feature_mean": feature_mu,
+            "feature_std": feature_std,
+            "target_mean": target_mu,
+            "target_std": target_std,
+        }
+
+        for col in scale_cols:
+            if col in feat_df.columns:
+                feat_df.loc[mask, col] = (feat_df.loc[mask, col] - feature_mu) / feature_std
+        feat_df.loc[mask, "Target_Adm_Transformed"] = (target_log - target_mu) / target_std
+
+    for col in feat_df.columns:
+        if col not in {"District", "Date", "Target_WD_Risk", "Target_XD_Risk"}:
+            if pd.api.types.is_integer_dtype(feat_df[col]):
+                feat_df[col] = feat_df[col].astype("float64")
+
+    targets = {
+        "District",
+        "Date",
+        "Target_Adm",
+        "Target_Adm_Transformed",
+        "Target_WD_Risk",
+        "Target_XD_Risk",
     }
-    risk_fg = {
-        "Low": "#0b2e13",
-        "Moderate": "#4d3d00",
-        "High": "#ffffff",
-        "Extreme": "#ffffff",
-        "Monitor": "#0b2e13",
-        "Alert": "#4d3d00",
-        "Respond": "#ffffff",
-        "Extremely Critical": "#58151c",
-        "Critical": "#721c24",
-        "Serious": "#8a4500",
-        "Acceptable": "#155724",
-        "No Data": "#555",
-    }
-
-    def _style(val):
-        if val in risk_bg:
-            return f"background-color:{risk_bg[val]};color:{risk_fg[val]};font-weight:bold"
-        return ""
-
-    return df_styler.map(_style, subset=columns)
-
-
-def colour_alert_summary_df(df: pd.DataFrame):
-    risk_bg = {
-        "Low": RISK_COLORS["Low"],
-        "Moderate": RISK_COLORS["Moderate"],
-        "High": RISK_COLORS["High"],
-        "Extreme": RISK_COLORS["Extreme"],
-        "Monitor": RISK_COLORS["Monitor"],
-        "Alert": RISK_COLORS["Alert"],
-        "Respond": RISK_COLORS["Respond"],
-        "No Data": "#f0f0f0",
-    }
-    risk_fg = {
-        "Low": "#0b2e13",
-        "Moderate": "#4d3d00",
-        "High": "#ffffff",
-        "Extreme": "#ffffff",
-        "Monitor": "#0b2e13",
-        "Alert": "#4d3d00",
-        "Respond": "#ffffff",
-        "No Data": "#555",
-    }
-
-    def _style_row(row):
-        level = row.get("Level", row.get("Anomaly Level", row.get("Operational Alert")))
-        if level in risk_bg:
-            style = f"background-color:{risk_bg[level]};color:{risk_fg[level]};font-weight:bold"
-            return [style] * len(row)
-        return [""] * len(row)
-
-    return df.style.apply(_style_row, axis=1)
+    feature_cols = [c for c in feat_df.columns if c not in targets]
+    return feat_df, feature_cols, scalers
 
 
 # =============================================================================
-# SECTION 5. MODEL TRAINING AND EVALUATION (METRIC HELPERS)
-# Calculate per-class diagnostic measures from observed and predicted labels.
+# SECTION 5. MODEL TRAINING AND EVALUATION
 # =============================================================================
+# Random Forest factories, chronological validation, and performance metrics.
+
+
+# =============================================================================
+# Chronological validation and model factories
+# =============================================================================
+
+
+@st.cache_data(show_spinner=False)
+def wf_splits(feat_df: pd.DataFrame, n_splits: int = 6, min_months: int = 12):
+    dates = sorted(feat_df["Date"].unique())
+    n = len(dates)
+    if n < min_months + 2:
+        return []
+
+    cutoff = dates[0] + pd.DateOffset(months=min_months)
+    min_i = next((i for i, d in enumerate(dates) if d >= cutoff), n - 1)
+    step = max(1, (n - min_i) // n_splits)
+
+    splits = []
+    for i in range(n_splits):
+        ci = min_i + i * step
+        if ci >= n - 1:
+            break
+        te = min(ci + step, n - 1)
+        tr_i = feat_df[feat_df["Date"].isin(dates[:ci])].index
+        te_i = feat_df[feat_df["Date"].isin(dates[ci:te])].index
+        if len(tr_i) >= 10 and len(te_i) >= 5:
+            splits.append((tr_i, te_i))
+    return splits
+
+
+def make_classifier(target: str) -> RandomForestClassifier:
+    if target == "WD":
+        class_weight = {0: 0.8, 1: 2.0, 2: 3.8, 3: 5.8}
+        max_depth = 16
+        min_leaf = 1
+    else:
+        class_weight = {0: 1.0, 1: 1.5, 2: 2.6, 3: 4.0}
+        max_depth = 14
+        min_leaf = 2
+
+    return RandomForestClassifier(
+        n_estimators=700,
+        max_depth=max_depth,
+        min_samples_leaf=min_leaf,
+        min_samples_split=3,
+        max_features="sqrt",
+        class_weight=class_weight,
+        bootstrap=True,
+        random_state=42,
+        n_jobs=-1,
+    )
+
+
+def make_regressor() -> RandomForestRegressor:
+    return RandomForestRegressor(
+        n_estimators=700,
+        max_depth=14,
+        min_samples_leaf=1,
+        min_samples_split=3,
+        max_features="sqrt",
+        random_state=42,
+        n_jobs=-1,
+    )
+
+
+# =============================================================================
+# Classification probabilities, thresholds, and diagnostics
+# =============================================================================
+
+
+def predict_with_thresholds(proba: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
+    adjusted = proba / thresholds.reshape(1, -1)
+    return adjusted.argmax(axis=1)
+
+
+def tune_thresholds(y_true: np.ndarray, proba: np.ndarray, target: str) -> np.ndarray:
+    if target == "WD":
+        grids = [
+            np.linspace(0.55, 0.85, 4),
+            np.linspace(0.26, 0.52, 4),
+            np.linspace(0.12, 0.34, 5),
+            np.linspace(0.08, 0.24, 5),
+        ]
+    else:
+        grids = [
+            np.linspace(0.38, 0.62, 4),
+            np.linspace(0.24, 0.46, 4),
+            np.linspace(0.16, 0.36, 5),
+            np.linspace(0.10, 0.26, 5),
+        ]
+
+    best = (
+        np.array([0.68, 0.36, 0.22, 0.12])
+        if target == "WD"
+        else np.array([0.50, 0.34, 0.24, 0.14])
+    )
+    best_score = -np.inf
+
+    for thr_values in product(*grids):
+        thr = np.array(thr_values)
+        pred = predict_with_thresholds(proba, thr)
+        recalls = recall_score(
+            y_true,
+            pred,
+            labels=list(range(len(RISK_LEVELS))),
+            average=None,
+            zero_division=0,
+        )
+        precision_high = precision_score(
+            np.isin(y_true, [2, 3]).astype(int),
+            np.isin(pred, [2, 3]).astype(int),
+            zero_division=0,
+        )
+        if target == "WD":
+            score = (
+                0.12 * recalls[0]
+                + 0.20 * recalls[1]
+                + 0.32 * recalls[2]
+                + 0.36 * recalls[3]
+                + 0.05 * precision_high
+            )
+        else:
+            score = recalls.mean() + 0.05 * precision_high
+        if score > best_score:
+            best_score = score
+            best = thr
+    return best
+
+
+def full_proba(model, X: np.ndarray) -> np.ndarray:
+    proba = model.predict_proba(X)
+    full = np.zeros((len(X), len(RISK_LEVELS)))
+    for pos, cls in enumerate(model.classes_):
+        full[:, cls] = proba[:, pos]
+    return full
+
 
 def compute_per_class_metrics(all_true: list[int], all_pred: list[int]) -> dict:
     conf = confusion_matrix(all_true, all_pred, labels=list(range(len(RISK_LEVELS))))
@@ -919,9 +1238,415 @@ def compute_per_class_metrics(all_true: list[int], all_pred: list[int]) -> dict:
 
 
 # =============================================================================
-# SECTION 7. ANALYSIS AND GEOSPATIAL VISUALIZATION (ANALYSIS)
-# Correlations, district/region comparisons, and historical anomaly trends.
+# Model training and validation outputs
 # =============================================================================
+
+
+@st.cache_data(show_spinner=False)
+def run_classification(feat_df: pd.DataFrame, feature_cols: list[str], target: str = "WD"):
+    target_col = f"Target_{target}_Risk"
+    le = RiskLabelEncoder()
+    valid = feat_df[feat_df[target_col].isin(RISK_LEVELS)].copy().reset_index(drop=True)
+    valid["y"] = le.transform(valid[target_col])
+
+    X = valid[feature_cols].values
+    y = valid["y"].values
+    splits = wf_splits(valid)
+    if not splits:
+        return {"error": f"Not enough data for {target} risk classification."}
+
+    cv_acc, cv_f1, cv_bal_acc, cv_macro_recall = [], [], [], []
+    all_true, all_pred = [], []
+
+    for tr_i, te_i in splits:
+        tr_p = valid.index.get_indexer(tr_i)
+        tr_p = tr_p[tr_p >= 0]
+        te_p = valid.index.get_indexer(te_i)
+        te_p = te_p[te_p >= 0]
+        if not len(tr_p) or not len(te_p):
+            continue
+
+        model = make_classifier(target)
+        model.fit(X[tr_p], y[tr_p])
+        thresholds = tune_thresholds(y[tr_p], full_proba(model, X[tr_p]), target)
+        p = predict_with_thresholds(full_proba(model, X[te_p]), thresholds)
+
+        cv_acc.append(accuracy_score(y[te_p], p))
+        cv_f1.append(f1_score(y[te_p], p, average="weighted", zero_division=0))
+        cv_bal_acc.append(balanced_accuracy_score(y[te_p], p))
+        cv_macro_recall.append(recall_score(y[te_p], p, average="macro", zero_division=0))
+        all_true.extend(y[te_p].tolist())
+        all_pred.extend(p.tolist())
+
+    final_model = make_classifier(target)
+    final_model.fit(X, y)
+    thresholds = tune_thresholds(y, full_proba(final_model, X), target)
+
+    feat_imp = pd.DataFrame({
+        "Feature": feature_cols,
+        "Importance": final_model.feature_importances_,
+    }).sort_values("Importance", ascending=False)
+
+    pcm = compute_per_class_metrics(all_true, all_pred)
+    return {
+        "cv_acc": float(np.mean(cv_acc)),
+        "cv_acc_std": float(np.std(cv_acc)),
+        "cv_f1": float(np.mean(cv_f1)),
+        "cv_bal_acc": float(np.mean(cv_bal_acc)),
+        "cv_macro_recall": float(np.mean(cv_macro_recall)),
+        "feat_imp": feat_imp,
+        "model": final_model,
+        "thresholds": thresholds,
+        "le": le,
+        "n_folds": len(splits),
+        "target": target,
+        "per_class": pcm["per_class"],
+        "all_true": all_true,
+        "all_pred": all_pred,
+    }
+
+
+@st.cache_data(show_spinner=False)
+def run_regression_cv(feat_df: pd.DataFrame, feature_cols: list[str], scalers: dict):
+    valid = feat_df.dropna(subset=["Target_Adm_Transformed"]).copy().reset_index(drop=True)
+    X = valid[feature_cols].values
+    y = valid["Target_Adm_Transformed"].values
+    splits = wf_splits(valid)
+    if not splits:
+        return {"error": "Not enough data for regression CV."}
+
+    mae_cv, rmse_cv, resid_rows = [], [], []
+    for tr_i, te_i in splits:
+        tr_p = valid.index.get_indexer(tr_i)
+        tr_p = tr_p[tr_p >= 0]
+        te_p = valid.index.get_indexer(te_i)
+        te_p = te_p[te_p >= 0]
+        if not len(tr_p) or not len(te_p):
+            continue
+
+        model = make_regressor()
+        model.fit(X[tr_p], y[tr_p])
+        pred_transformed = model.predict(X[te_p])
+        meta = valid.iloc[te_p]
+        actual_raw = meta["Target_Adm"].values
+        pred_raw = np.array([
+            inverse_regression_target(pred_transformed[j], scalers[meta.iloc[j]["District"]])
+            for j in range(len(te_p))
+        ])
+
+        mae_cv.append(mean_absolute_error(actual_raw, pred_raw))
+        rmse_cv.append(np.sqrt(mean_squared_error(actual_raw, pred_raw)))
+
+        for j in range(len(te_p)):
+            residual = actual_raw[j] - pred_raw[j]
+            resid_rows.append({
+                "District": meta.iloc[j]["District"],
+                "Date": meta.iloc[j]["Date"],
+                "XD_Risk": meta.iloc[j]["Target_XD_Risk"],
+                "Actual": actual_raw[j],
+                "Predicted": pred_raw[j],
+                "Residual": residual,
+                "Signed_Error": pred_raw[j] - actual_raw[j],
+                "Absolute_Error": abs(residual),
+            })
+
+    final_model = make_regressor()
+    final_model.fit(X, y)
+    feat_imp = pd.DataFrame({
+        "Feature": feature_cols,
+        "Importance": final_model.feature_importances_,
+    }).sort_values("Importance", ascending=False)
+    residuals = pd.DataFrame(resid_rows)
+
+    return {
+        "cv_mae": float(np.mean(mae_cv)),
+        "cv_mae_std": float(np.std(mae_cv)),
+        "cv_rmse": float(np.mean(rmse_cv)),
+        "cv_mean_error": float(residuals["Signed_Error"].mean()) if not residuals.empty else np.nan,
+        "cv_median_ae": float(residuals["Absolute_Error"].median()) if not residuals.empty else np.nan,
+        "cv_p90_ae": float(residuals["Absolute_Error"].quantile(0.90)) if not residuals.empty else np.nan,
+        "feat_imp": feat_imp,
+        "residuals": residuals,
+        "n_folds": len(splits),
+        "model": final_model,
+        "target_transform": "log1p raw caseload, z-scored within district",
+    }
+
+
+# =============================================================================
+# SECTION 6. FORECASTING AND UNCERTAINTY
+# =============================================================================
+# Three recursive monthly forecasts, tree-based bounds, and district eligibility.
+
+
+# =============================================================================
+# Recursive forecaster and cached forecast execution
+# =============================================================================
+
+
+class Forecaster:
+    HORIZON = 3
+    # Engineered features computed at inference time. Keep in sync with build_features.
+    BASE = [
+        "Month", "Quarter", "Month_Sin", "Month_Cos",
+        "Lag1", "Lag2", "Lag3",
+        "Lag1_Z",
+        "Roll3_Mean", "Roll3_Std", "Roll6_Mean",
+        "Seasonal_Lag12",
+        "Hist_Mean", "Hist_Std", "Hist_P90", "Hist_P95",
+        "Lag1_Over_P95",
+        "Lag1_Ratio_P95",
+        "Recent_WD_High_Count", "WD_Score_Lag", "XD_Score_Lag",
+    ]
+
+    def fit(self, feat_df: pd.DataFrame, feature_cols: list[str], scalers: dict):
+        self.feature_cols = feature_cols
+        self.scalers = scalers
+        self.extra = [c for c in feature_cols if c not in self.BASE]
+
+        valid = feat_df.dropna(subset=["Target_Adm_Transformed"]).copy()
+        self.extra_vals = {}
+        for d in valid["District"].unique():
+            last = valid[valid["District"] == d].iloc[-1]
+            self.extra_vals[d] = {c: float(last.get(c, 0.0)) for c in self.extra}
+
+        self.reg = make_regressor()
+        self.reg.fit(valid[feature_cols].values, valid["Target_Adm_Transformed"].values)
+
+        # Restore classifier-driven within-district anomaly prediction for forecasts.
+        self.wd_clf = None
+        self.wd_thresholds = None
+        self.wd_le = None
+        wd_valid = valid[valid["Target_WD_Risk"].isin(RISK_LEVELS)].copy()
+        if not wd_valid.empty:
+            self.wd_le = RiskLabelEncoder()
+            wd_y = self.wd_le.transform(wd_valid["Target_WD_Risk"])
+            self.wd_clf = make_classifier("WD")
+            self.wd_clf.fit(wd_valid[feature_cols].values, wd_y)
+            self.wd_thresholds = tune_thresholds(wd_y, full_proba(self.wd_clf, wd_valid[feature_cols].values), "WD")
+        return self
+
+    def predict(self, df: pd.DataFrame, forecast_cutoff: pd.Timestamp | None = None) -> pd.DataFrame:
+        rows = []
+        severity_setup = get_severity_setup(df)
+        if forecast_cutoff is None:
+            forecast_cutoff = df.attrs.get("forecast_cutoff", df["Date"].max())
+        if pd.isna(forecast_cutoff):
+            return pd.DataFrame()
+        forecast_cutoff = pd.Timestamp(forecast_cutoff).to_period("M").to_timestamp()
+
+        for district in df["District_Name"].unique():
+            d = df[df["District_Name"] == district].sort_values("Date")
+            if len(d) < 3 or d["Date"].iloc[-1].to_period("M") != forecast_cutoff.to_period("M"):
+                continue
+
+            scaler = self.scalers.get(district)
+            if scaler is None:
+                continue
+            mu = scaler["feature_mean"]
+            sg = max(scaler["feature_std"], 1e-6)
+
+            hist_adm = list(d["Acut_Malnutrition"].astype(float).values)
+            hist_wd = list(d["wd_score"].values)
+            hist_xd = list(d["xd_score"].values)
+            extras = self.extra_vals.get(district, {c: 0.0 for c in self.extra})
+            total_pop_col = severity_setup["population_col"]
+            total_pop = np.nan
+            if total_pop_col is not None and total_pop_col in d.columns:
+                total_pop = pd.to_numeric(d[total_pop_col], errors="coerce").dropna().iloc[-1] if not d[total_pop_col].dropna().empty else np.nan
+
+            for step in range(1, self.HORIZON + 1):
+                fd = forecast_cutoff + pd.DateOffset(months=step)
+                hist = np.array(hist_adm, dtype=float)
+                roll3 = hist[-3:]
+                roll6 = hist[-6:] if len(hist) >= 6 else roll3
+                hist_mu = float(hist.mean())
+                hist_sd = float(hist.std()) if hist.std() > 1e-6 else 1.0
+                #p90, p95 = np.percentile(hist, [90, 95])
+                p75, p90, p95 = np.percentile(hist, [75, 90, 95])
+                lag1, lag2, lag3 = hist[-1], hist[-2], hist[-3]
+
+                base_raw = {
+                    # Calendar
+                    "Month": fd.month,
+                    "Quarter": fd.quarter,
+                    "Month_Sin": np.sin(2 * np.pi * fd.month / 12),
+                    "Month_Cos": np.cos(2 * np.pi * fd.month / 12),
+                    # Raw lags
+                    "Lag1": (lag1 - mu) / sg,
+                    "Lag2": (lag2 - mu) / sg,
+                    "Lag3": (lag3 - mu) / sg,
+                    # Standardised lag
+                    "Lag1_Z": (lag1 - hist_mu) / hist_sd,
+                    # Rolling windows
+                    "Roll3_Mean": (roll3.mean() - mu) / sg,
+                    "Roll3_Std": roll3.std(),
+                    "Roll6_Mean": (roll6.mean() - mu) / sg,
+                    # Seasonal reference
+                    "Seasonal_Lag12": (hist[-12] - mu) / sg if len(hist) >= 12 else (lag1 - mu) / sg,
+                    # Historical distribution
+                    "Hist_Mean": (hist_mu - mu) / sg,
+                    "Hist_Std": (hist_sd - mu) / sg,
+                    "Hist_P90": (p90 - mu) / sg,
+                    "Hist_P95": (p95 - mu) / sg,
+                    # Threshold exceedance / ratio
+                    "Lag1_Over_P95": (lag1 - p95) / sg,
+                    "Lag1_Ratio_P95": lag1 / (p95 + 1e-6),
+                    # Risk history
+                    "Recent_WD_High_Count": np.isin(hist_wd[-3:], [2, 3]).sum(),
+                    "WD_Score_Lag": hist_wd[-1],
+                    "XD_Score_Lag": hist_xd[-1],
+                }
+
+                fv = np.array([[{**base_raw, **extras}.get(c, 0.0) for c in self.feature_cols]])
+                pred_transformed = float(self.reg.predict(fv)[0])
+                pred_raw = round(inverse_regression_target(pred_transformed, scaler))
+
+                tree_preds = np.array([t.predict(fv)[0] for t in self.reg.estimators_])
+                tree_preds_raw = inverse_regression_target(tree_preds, scaler)
+                lo, hi = np.percentile(tree_preds_raw, [10, 90])
+                lo = max(0, round(lo))
+                hi = max(lo, round(hi))
+
+                p50 = np.percentile(hist, 50)
+                if self.wd_clf is not None and self.wd_thresholds is not None and self.wd_le is not None:
+                    wd_code = int(predict_with_thresholds(full_proba(self.wd_clf, fv), self.wd_thresholds)[0])
+                    wd_risk = self.wd_le.inverse_transform([wd_code])[0]
+                else:
+                    wd_risk = classify_risk(pred_raw, p50, p75, p90, p95)
+                pred_rate = pred_raw / total_pop * 100000 if pd.notna(total_pop) and total_pop > 0 else np.nan
+                lower_severity_phase = "No Data"
+                severity_phase = "No Data"
+                rows.append({
+                    "District": district,
+                    "Date": fd,
+                    "Month_Year": fd.strftime("%B %Y"),
+                    "Step": step,
+                    "Predicted": int(pred_raw),
+                    "Lower_80": int(lo),
+                    "Upper_80": int(hi),
+                    "WD_Risk": wd_risk,
+                    "XD_Risk": "No Data",
+                    "Composite_Risk": "No Data",
+                    "Operational_Alert": "No Data",
+                    "Operational_Alert_Why": "",
+                    "Severity_Prevalence_Pct": np.nan,
+                    "Severity_Phase": severity_phase,
+                    "Lower_Severity_Phase": lower_severity_phase,
+                    "Severity_Basis": severity_setup["forecast_note"],
+                    "Predicted_Caseload_per_100000_Pop": pred_rate,
+                })
+
+                hist_adm.append(pred_raw)
+                hist_wd.append(RISK_ORDER.get(wd_risk, 0))
+                hist_xd.append(0)
+
+        result = pd.DataFrame(rows)
+        if result.empty:
+            return result
+
+        all_hist_vals = df["Acut_Malnutrition"].dropna().values
+        for month_date in result["Date"].unique():
+            mask = result["Date"] == month_date
+            preds = result.loc[mask, "Predicted"].values
+            if len(preds) >= 3:
+                xp50, xp75, xp90, xp95 = np.percentile(preds, [50, 75, 90, 95])
+            else:
+                xp50, xp75, xp90, xp95 = np.percentile(all_hist_vals, [50, 75, 90, 95])
+            for idx in result[mask].index:
+                pred = result.loc[idx, "Predicted"]
+                xd_risk = classify_risk(pred, xp50, xp75, xp90, xp95)
+                wd_risk = result.loc[idx, "WD_Risk"]
+                severity_phase = result.loc[idx, "Severity_Phase"]
+                lower_severity_phase = result.loc[idx, "Lower_Severity_Phase"]
+                operational_alert = derive_operational_alert(wd_risk, xd_risk, severity_phase, lower_severity_phase)
+                operational_alert_why = explain_operational_alert(wd_risk, xd_risk, severity_phase, lower_severity_phase)
+                result.loc[idx, "XD_Risk"] = xd_risk
+                result.loc[idx, "Operational_Alert"] = operational_alert
+                result.loc[idx, "Operational_Alert_Why"] = operational_alert_why
+                result.loc[idx, "Composite_Risk"] = operational_alert
+
+        return result
+
+
+@st.cache_data(show_spinner=False)
+def run_forecast(feat_df, feature_cols, scalers, df, data_key, forecast_cutoff=None):
+    fc = Forecaster().fit(feat_df, feature_cols, scalers)
+    return fc.predict(df, forecast_cutoff)
+
+
+# =============================================================================
+# SECTION 7. ANALYSIS AND GEOSPATIAL VISUALIZATION
+# =============================================================================
+# Anomaly summaries, correlations, historical trends, and district maps.
+
+
+# =============================================================================
+# Anomaly count summaries and charts
+# =============================================================================
+
+
+def build_phase_count_table(values: pd.Series, levels: list[str] | None = None, label: str = "Classification") -> pd.DataFrame:
+    levels = levels or RISK_LEVELS
+    counts = values.value_counts().reindex(levels).fillna(0).astype(int).reset_index()
+    counts.columns = [label, "District Count"]
+    return counts
+
+
+def build_alert_comparison_table(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for level in RISK_LEVELS:
+        rows.append({
+            "Indicator": "Within-District Anomaly",
+            "Level": level,
+            "District Count": int(df["wd_risk"].value_counts().reindex(RISK_LEVELS).fillna(0).get(level, 0)),
+        })
+    for level in RISK_LEVELS:
+        rows.append({
+            "Indicator": "Between-Districts Anomaly",
+            "Level": level,
+            "District Count": int(df["xd_risk"].value_counts().reindex(RISK_LEVELS).fillna(0).get(level, 0)),
+        })
+    for level in OPERATIONAL_ALERT_LEVELS:
+        rows.append({
+            "Indicator": "Operational Alert",
+            "Level": level,
+            "District Count": int(df["Operational_Alert"].value_counts().reindex(OPERATIONAL_ALERT_LEVELS).fillna(0).get(level, 0)),
+        })
+    return pd.DataFrame(rows)
+
+
+def render_phase_pie_chart(counts: pd.DataFrame, level_col: str = "Level"):
+    chart_df = counts[counts["District Count"] > 0].copy()
+    if chart_df.empty:
+        st.info("No districts in the current selection.")
+        return
+
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=chart_df[level_col],
+                values=chart_df["District Count"],
+                hole=0.35,
+                sort=False,
+                marker=dict(colors=[RISK_COLORS.get(level, "#bdbdbd") for level in chart_df[level_col]]),
+                textinfo="label+percent",
+                hovertemplate="%{label}: %{value} districts (%{percent})<extra></extra>",
+            )
+        ]
+    )
+    fig.update_layout(
+        height=320,
+        margin=dict(l=10, r=10, t=10, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# =============================================================================
+# Covariate correlations and historical analysis
+# =============================================================================
+
 
 def compute_spearman_correlations(data_slice: pd.DataFrame):
     target = "Acut_Malnutrition"
@@ -1309,738 +2034,34 @@ def render_historical_risk_trend(df: pd.DataFrame, scope_label: str = "All Distr
 
 
 # =============================================================================
-# SECTION 2. DATA LOADING AND QUALITY CHECKS (CSV LOADING)
-# Read inputs, prepare district/date fields, and retain the shared cutoff.
+# Boundary preparation and district maps
 # =============================================================================
 
-@st.cache_data(show_spinner=False)
-def load_data_from_bytes(file_bytes: bytes, _hash: str) -> pd.DataFrame:
-    content = file_bytes.decode("utf-8")
-    return load_data_from_df(pd.read_csv(StringIO(content)))
+
+def guess_name_col(columns: list[str]) -> str:
+    keywords = ["district", "dist", "name", "admin", "adm"]
+    non_geom = [c for c in columns if c != "geometry"]
+    for kw in keywords:
+        for col in non_geom:
+            if kw in col.lower():
+                return col
+    return non_geom[0] if non_geom else ""
 
 
-@st.cache_data(show_spinner=False)
-def load_data_from_path(path: str) -> pd.DataFrame:
-    return load_data_from_df(pd.read_csv(path))
-
-
-def load_data_from_df(df: pd.DataFrame) -> pd.DataFrame:
-    required = ["time_period", "Acut_Malnutrition", "Region_District"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-    df["Date"] = df["time_period"].apply(parse_date)
-    # Keep the source cutoff even when the latest month has missing caseloads.
-    forecast_cutoff = df["Date"].max()
-    df = df.dropna(subset=["Date", "Acut_Malnutrition"]).copy()
-
-    raw_rd = df["Region_District"].astype(str).str.strip()
-    df["Region_District"] = raw_rd
-
-    if "District" in df.columns:
-        df["District_Name"] = df["District"].astype(str).str.strip()
-    else:
-        df["District_Name"] = raw_rd.str.split("|").str[-1].str.strip()
-
-    has_pipe = raw_rd.str.contains("|", regex=False)
-    df["Region_Label"] = ""
-    df.loc[has_pipe, "Region_Label"] = raw_rd[has_pipe].str.split("|").str[0].str.strip()
-    if "Region" in df.columns:
-        df.loc[~has_pipe, "Region_Label"] = df.loc[~has_pipe, "Region"].astype(str).str.strip()
-    else:
-        df.loc[~has_pipe, "Region_Label"] = "Unknown"
-
-    df["Display_Name"] = df["Region_Label"] + " - " + df["District_Name"]
-    df = df.sort_values(["District_Name", "Date"]).reset_index(drop=True)
-
-    severity_setup = get_severity_setup(df)
-    df["Severity_Basis"] = severity_setup["basis"]
-    df["Severity_Prevalence_Pct"] = np.nan
-    df["Severity_Phase"] = "No Data"
-    df["Caseload_per_100000_Pop"] = np.nan
-    df["Denominator_Source"] = get_denominator_source_label(severity_setup)
-    df["Operational_Alert"] = "No Data"
-    df["Operational_Alert_Why"] = ""
-
-    if severity_setup["population_col"] is not None:
-        total_pop = pd.to_numeric(df[severity_setup["population_col"]], errors="coerce").replace(0, np.nan)
-        df["Caseload_per_100000_Pop"] = pd.to_numeric(df["Acut_Malnutrition"], errors="coerce") / total_pop * 100000
-
-    if severity_setup["observed_method"] in {"gam_whz", "gam_muac"}:
-        prevalence = pd.to_numeric(df[severity_setup["prevalence_col"]], errors="coerce")
-        df["Severity_Prevalence_Pct"] = prevalence
-        df["Severity_Phase"] = prevalence.apply(classify_ipc_amn_phase)
-
-    df[["wd_p50", "wd_p75", "wd_p90", "wd_p95"]] = np.nan
-    df["wd_risk"] = "No Data"
-
-    for district in df["District_Name"].unique():
-        mask = df["District_Name"] == district
-        d = df[mask].sort_values("Date")
-        for idx in d.index:
-            past = d.loc[d["Date"] < df.loc[idx, "Date"], "Acut_Malnutrition"]
-            if len(past) >= 2:
-                p50, p75, p90, p95 = np.percentile(past, [50, 75, 90, 95])
-            else:
-                v = df.loc[idx, "Acut_Malnutrition"]
-                p50 = p75 = p90 = p95 = v
-            df.loc[idx, ["wd_p50", "wd_p75", "wd_p90", "wd_p95"]] = p50, p75, p90, p95
-            df.loc[idx, "wd_risk"] = classify_risk(df.loc[idx, "Acut_Malnutrition"], p50, p75, p90, p95)
-
-    df[["xd_p50", "xd_p75", "xd_p90", "xd_p95"]] = np.nan
-    df["xd_risk"] = "No Data"
-
-    for date in sorted(df["Date"].unique()):
-        month = date.month
-        curr_idx = df[df["Date"] == date].index
-        past_all = df[df["Date"] < date]
-
-        hist = past_all[past_all["Date"].dt.month == month]["Acut_Malnutrition"]
-        if len(hist) < 3:
-            season_months = [(month - 1) % 12 + 1, month, month % 12 + 1]
-            hist = past_all[past_all["Date"].dt.month.isin(season_months)]["Acut_Malnutrition"]
-        if len(hist) < 3:
-            hist = past_all["Acut_Malnutrition"]
-        if len(hist) < 3:
-            hist = df["Acut_Malnutrition"]
-
-        p50, p75, p90, p95 = np.percentile(hist, [50, 75, 90, 95])
-        for idx in curr_idx:
-            val = df.loc[idx, "Acut_Malnutrition"]
-            df.loc[idx, ["xd_p50", "xd_p75", "xd_p90", "xd_p95"]] = p50, p75, p90, p95
-            df.loc[idx, "xd_risk"] = classify_risk(val, p50, p75, p90, p95)
-
-    df["wd_score"] = df["wd_risk"].map(RISK_ORDER).fillna(0).astype(int)
-    df["xd_score"] = df["xd_risk"].map(RISK_ORDER).fillna(0).astype(int)
-    df["Operational_Alert"] = df.apply(
-        lambda row: derive_operational_alert(
-            row["wd_risk"],
-            row["xd_risk"],
-            row["Severity_Phase"],
-        ),
-        axis=1,
-    )
-    df["Operational_Alert_Why"] = df.apply(
-        lambda row: explain_operational_alert(
-            row["wd_risk"],
-            row["xd_risk"],
-            row["Severity_Phase"],
-        ),
-        axis=1,
-    )
-    df["month"] = df["Date"].dt.month
-    df["quarter"] = df["Date"].dt.quarter
-    df.attrs["forecast_cutoff"] = forecast_cutoff
-
-    return df.reset_index(drop=True)
-
-
-# =============================================================================
-# SECTION 4. TARGET PREPARATION AND FEATURE ENGINEERING
-# Build historical predictors and transform the GAM case-count target.
-# =============================================================================
-#
-# Removed lower-importance / redundant engineered features:
-# Lag2_Z, Lag3_Z, Roll6_Max, Roll12_Mean, Roll12_Max, Trend, Acceleration,
-# Hist_P75, Lag1_Over_P75, Lag1_Over_P90, Lag1_Ratio_P75, Lag1_Ratio_P90.
-# Hist_P90 is retained because it helps separate High from Extreme conditions.
-
-@st.cache_data(show_spinner=False)
-def build_features(df: pd.DataFrame):
-    records = []
-
-    for district in df["District_Name"].unique():
-        d = df[df["District_Name"] == district].sort_values("Date").reset_index(drop=True)
-        adm = d["Acut_Malnutrition"].astype(float).values
-
-        for i in range(3, len(d)):
-            hist = adm[:i]
-            roll3 = adm[i - 3:i]
-            roll6 = adm[max(0, i - 6):i]
-
-            hist_mu = float(np.mean(hist))
-            hist_sd = float(np.std(hist)) if np.std(hist) > 1e-6 else 1.0
-            hist_p90, hist_p95 = np.percentile(hist, [90, 95])
-
-            lag1 = float(adm[i - 1])
-            lag2 = float(adm[i - 2])
-            lag3 = float(adm[i - 3])
-
-            same_month_hist = d.loc[
-                (d.index < i) & (d["Date"].dt.month == d.loc[i, "Date"].month),
-                "Acut_Malnutrition",
-            ].astype(float)
-            seasonal_lag_12 = float(same_month_hist.iloc[-1]) if len(same_month_hist) else lag1
-
-            recent_scores = d.loc[i - 3:i - 1, "wd_score"].astype(float).values
-            recent_high = np.isin(recent_scores, [2, 3]).sum()
-
-            row = {
-                "District": district,
-                "Date": d.loc[i, "Date"],
-                # Calendar
-                "Month": d.loc[i, "Date"].month,
-                "Quarter": d.loc[i, "Date"].quarter,
-                "Month_Sin": np.sin(2 * np.pi * d.loc[i, "Date"].month / 12),
-                "Month_Cos": np.cos(2 * np.pi * d.loc[i, "Date"].month / 12),
-                # Raw lags
-                "Lag1": lag1,
-                "Lag2": lag2,
-                "Lag3": lag3,
-                # Standardised lag
-                "Lag1_Z": (lag1 - hist_mu) / hist_sd,
-                # Rolling windows
-                "Roll3_Mean": float(np.mean(roll3)),
-                "Roll3_Std": float(np.std(roll3)),
-                "Roll6_Mean": float(np.mean(roll6)),
-                # Seasonal reference
-                "Seasonal_Lag12": seasonal_lag_12,
-                # Historical distribution
-                "Hist_Mean": hist_mu,
-                "Hist_Std": hist_sd,
-                "Hist_P90": hist_p90,
-                "Hist_P95": hist_p95,
-                # Threshold exceedance / ratio
-                "Lag1_Over_P95": lag1 - hist_p95,
-                "Lag1_Ratio_P95": lag1 / (hist_p95 + 1e-6),
-                # Risk history
-                "Recent_WD_High_Count": recent_high,
-                "WD_Score_Lag": d.loc[i - 1, "wd_score"],
-                "XD_Score_Lag": d.loc[i - 1, "xd_score"],
-                "Target_Adm": adm[i],
-                "Target_WD_Risk": d.loc[i, "wd_risk"],
-                "Target_XD_Risk": d.loc[i, "xd_risk"],
-            }
-
-            # Passthrough numeric covariates, lagged by one month.
-            for col in d.columns:
-                if col not in row and col not in _EXCLUDE_FROM_FEATURES:
-                    if pd.api.types.is_numeric_dtype(d[col]):
-                        row[col] = d.loc[i - 1, col]
-
-            records.append(row)
-
-    feat_df = pd.DataFrame(records).dropna().reset_index(drop=True)
-    feat_df = apply_log_transform(feat_df, SKEWED_COVS)
-
-    scale_cols = [
-        "Lag1", "Lag2", "Lag3",
-        "Roll3_Mean", "Roll6_Mean",
-        "Seasonal_Lag12",
-        "Hist_Mean", "Hist_Std",
-        "Hist_P90", "Hist_P95",
-        "Lag1_Over_P95",
-    ]
-
-    scalers = {}
-    feat_df["Target_Adm_Transformed"] = np.nan
-    for district in feat_df["District"].unique():
-        mask = feat_df["District"] == district
-        baseline = feat_df.loc[mask, "Lag1"].astype(float)
-        feature_mu = float(baseline.mean())
-        feature_std = float(baseline.std())
-        # Sample standard deviation is NaN when only one usable row remains.
-        if not np.isfinite(feature_std) or feature_std < 1e-6:
-            feature_std = 1.0
-
-        target_log = transform_regression_target(feat_df.loc[mask, "Target_Adm"].astype(float))
-        target_mu = float(target_log.mean())
-        target_std = float(target_log.std())
-        if not np.isfinite(target_std) or target_std < 1e-6:
-            target_std = 1.0
-
-        scalers[district] = {
-            "feature_mean": feature_mu,
-            "feature_std": feature_std,
-            "target_mean": target_mu,
-            "target_std": target_std,
-        }
-
-        for col in scale_cols:
-            if col in feat_df.columns:
-                feat_df.loc[mask, col] = (feat_df.loc[mask, col] - feature_mu) / feature_std
-        feat_df.loc[mask, "Target_Adm_Transformed"] = (target_log - target_mu) / target_std
-
-    for col in feat_df.columns:
-        if col not in {"District", "Date", "Target_WD_Risk", "Target_XD_Risk"}:
-            if pd.api.types.is_integer_dtype(feat_df[col]):
-                feat_df[col] = feat_df[col].astype("float64")
-
-    targets = {
-        "District",
-        "Date",
-        "Target_Adm",
-        "Target_Adm_Transformed",
-        "Target_WD_Risk",
-        "Target_XD_Risk",
-    }
-    feature_cols = [c for c in feat_df.columns if c not in targets]
-    return feat_df, feature_cols, scalers
-
-
-# =============================================================================
-# SECTION 5. MODEL TRAINING AND EVALUATION
-# Random Forest factories, chronological validation, and performance metrics.
-# =============================================================================
-
-@st.cache_data(show_spinner=False)
-def wf_splits(feat_df: pd.DataFrame, n_splits: int = 6, min_months: int = 12):
-    dates = sorted(feat_df["Date"].unique())
-    n = len(dates)
-    if n < min_months + 2:
-        return []
-
-    cutoff = dates[0] + pd.DateOffset(months=min_months)
-    min_i = next((i for i, d in enumerate(dates) if d >= cutoff), n - 1)
-    step = max(1, (n - min_i) // n_splits)
-
-    splits = []
-    for i in range(n_splits):
-        ci = min_i + i * step
-        if ci >= n - 1:
-            break
-        te = min(ci + step, n - 1)
-        tr_i = feat_df[feat_df["Date"].isin(dates[:ci])].index
-        te_i = feat_df[feat_df["Date"].isin(dates[ci:te])].index
-        if len(tr_i) >= 10 and len(te_i) >= 5:
-            splits.append((tr_i, te_i))
-    return splits
-
-
-def make_classifier(target: str) -> RandomForestClassifier:
-    if target == "WD":
-        class_weight = {0: 0.8, 1: 2.0, 2: 3.8, 3: 5.8}
-        max_depth = 16
-        min_leaf = 1
-    else:
-        class_weight = {0: 1.0, 1: 1.5, 2: 2.6, 3: 4.0}
-        max_depth = 14
-        min_leaf = 2
-
-    return RandomForestClassifier(
-        n_estimators=700,
-        max_depth=max_depth,
-        min_samples_leaf=min_leaf,
-        min_samples_split=3,
-        max_features="sqrt",
-        class_weight=class_weight,
-        bootstrap=True,
-        random_state=42,
-        n_jobs=-1,
-    )
-
-
-def make_regressor() -> RandomForestRegressor:
-    return RandomForestRegressor(
-        n_estimators=700,
-        max_depth=14,
-        min_samples_leaf=1,
-        min_samples_split=3,
-        max_features="sqrt",
-        random_state=42,
-        n_jobs=-1,
-    )
-
-
-def predict_with_thresholds(proba: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
-    adjusted = proba / thresholds.reshape(1, -1)
-    return adjusted.argmax(axis=1)
-
-
-def tune_thresholds(y_true: np.ndarray, proba: np.ndarray, target: str) -> np.ndarray:
-    if target == "WD":
-        grids = [
-            np.linspace(0.55, 0.85, 4),
-            np.linspace(0.26, 0.52, 4),
-            np.linspace(0.12, 0.34, 5),
-            np.linspace(0.08, 0.24, 5),
-        ]
-    else:
-        grids = [
-            np.linspace(0.38, 0.62, 4),
-            np.linspace(0.24, 0.46, 4),
-            np.linspace(0.16, 0.36, 5),
-            np.linspace(0.10, 0.26, 5),
-        ]
-
-    best = (
-        np.array([0.68, 0.36, 0.22, 0.12])
-        if target == "WD"
-        else np.array([0.50, 0.34, 0.24, 0.14])
-    )
-    best_score = -np.inf
-
-    for thr_values in product(*grids):
-        thr = np.array(thr_values)
-        pred = predict_with_thresholds(proba, thr)
-        recalls = recall_score(
-            y_true,
-            pred,
-            labels=list(range(len(RISK_LEVELS))),
-            average=None,
-            zero_division=0,
-        )
-        precision_high = precision_score(
-            np.isin(y_true, [2, 3]).astype(int),
-            np.isin(pred, [2, 3]).astype(int),
-            zero_division=0,
-        )
-        if target == "WD":
-            score = (
-                0.12 * recalls[0]
-                + 0.20 * recalls[1]
-                + 0.32 * recalls[2]
-                + 0.36 * recalls[3]
-                + 0.05 * precision_high
-            )
-        else:
-            score = recalls.mean() + 0.05 * precision_high
-        if score > best_score:
-            best_score = score
-            best = thr
-    return best
-
-
-def full_proba(model, X: np.ndarray) -> np.ndarray:
-    proba = model.predict_proba(X)
-    full = np.zeros((len(X), len(RISK_LEVELS)))
-    for pos, cls in enumerate(model.classes_):
-        full[:, cls] = proba[:, pos]
-    return full
-
-
-@st.cache_data(show_spinner=False)
-def run_classification(feat_df: pd.DataFrame, feature_cols: list[str], target: str = "WD"):
-    target_col = f"Target_{target}_Risk"
-    le = RiskLabelEncoder()
-    valid = feat_df[feat_df[target_col].isin(RISK_LEVELS)].copy().reset_index(drop=True)
-    valid["y"] = le.transform(valid[target_col])
-
-    X = valid[feature_cols].values
-    y = valid["y"].values
-    splits = wf_splits(valid)
-    if not splits:
-        return {"error": f"Not enough data for {target} risk classification."}
-
-    cv_acc, cv_f1, cv_bal_acc, cv_macro_recall = [], [], [], []
-    all_true, all_pred = [], []
-
-    for tr_i, te_i in splits:
-        tr_p = valid.index.get_indexer(tr_i)
-        tr_p = tr_p[tr_p >= 0]
-        te_p = valid.index.get_indexer(te_i)
-        te_p = te_p[te_p >= 0]
-        if not len(tr_p) or not len(te_p):
+def safe_geojson(gdf: gpd.GeoDataFrame) -> dict:
+    g = gdf.copy()
+    g["geometry"] = g["geometry"].simplify(0.01, preserve_topology=True)
+    for col in g.columns:
+        if col == "geometry":
             continue
+        if pd.api.types.is_datetime64_any_dtype(g[col]):
+            g[col] = g[col].astype(str)
+        elif g[col].dtype == object:
+            g[col] = g[col].fillna("Unknown").astype(str)
+        elif pd.api.types.is_float_dtype(g[col]):
+            g[col] = g[col].fillna(0).replace([np.inf, -np.inf], 0)
+    return json.loads(g.to_json(na="drop", show_bbox=False))
 
-        model = make_classifier(target)
-        model.fit(X[tr_p], y[tr_p])
-        thresholds = tune_thresholds(y[tr_p], full_proba(model, X[tr_p]), target)
-        p = predict_with_thresholds(full_proba(model, X[te_p]), thresholds)
-
-        cv_acc.append(accuracy_score(y[te_p], p))
-        cv_f1.append(f1_score(y[te_p], p, average="weighted", zero_division=0))
-        cv_bal_acc.append(balanced_accuracy_score(y[te_p], p))
-        cv_macro_recall.append(recall_score(y[te_p], p, average="macro", zero_division=0))
-        all_true.extend(y[te_p].tolist())
-        all_pred.extend(p.tolist())
-
-    final_model = make_classifier(target)
-    final_model.fit(X, y)
-    thresholds = tune_thresholds(y, full_proba(final_model, X), target)
-
-    feat_imp = pd.DataFrame({
-        "Feature": feature_cols,
-        "Importance": final_model.feature_importances_,
-    }).sort_values("Importance", ascending=False)
-
-    pcm = compute_per_class_metrics(all_true, all_pred)
-    return {
-        "cv_acc": float(np.mean(cv_acc)),
-        "cv_acc_std": float(np.std(cv_acc)),
-        "cv_f1": float(np.mean(cv_f1)),
-        "cv_bal_acc": float(np.mean(cv_bal_acc)),
-        "cv_macro_recall": float(np.mean(cv_macro_recall)),
-        "feat_imp": feat_imp,
-        "model": final_model,
-        "thresholds": thresholds,
-        "le": le,
-        "n_folds": len(splits),
-        "target": target,
-        "per_class": pcm["per_class"],
-        "all_true": all_true,
-        "all_pred": all_pred,
-    }
-
-
-@st.cache_data(show_spinner=False)
-def run_regression_cv(feat_df: pd.DataFrame, feature_cols: list[str], scalers: dict):
-    valid = feat_df.dropna(subset=["Target_Adm_Transformed"]).copy().reset_index(drop=True)
-    X = valid[feature_cols].values
-    y = valid["Target_Adm_Transformed"].values
-    splits = wf_splits(valid)
-    if not splits:
-        return {"error": "Not enough data for regression CV."}
-
-    mae_cv, rmse_cv, resid_rows = [], [], []
-    for tr_i, te_i in splits:
-        tr_p = valid.index.get_indexer(tr_i)
-        tr_p = tr_p[tr_p >= 0]
-        te_p = valid.index.get_indexer(te_i)
-        te_p = te_p[te_p >= 0]
-        if not len(tr_p) or not len(te_p):
-            continue
-
-        model = make_regressor()
-        model.fit(X[tr_p], y[tr_p])
-        pred_transformed = model.predict(X[te_p])
-        meta = valid.iloc[te_p]
-        actual_raw = meta["Target_Adm"].values
-        pred_raw = np.array([
-            inverse_regression_target(pred_transformed[j], scalers[meta.iloc[j]["District"]])
-            for j in range(len(te_p))
-        ])
-
-        mae_cv.append(mean_absolute_error(actual_raw, pred_raw))
-        rmse_cv.append(np.sqrt(mean_squared_error(actual_raw, pred_raw)))
-
-        for j in range(len(te_p)):
-            residual = actual_raw[j] - pred_raw[j]
-            resid_rows.append({
-                "District": meta.iloc[j]["District"],
-                "Date": meta.iloc[j]["Date"],
-                "XD_Risk": meta.iloc[j]["Target_XD_Risk"],
-                "Actual": actual_raw[j],
-                "Predicted": pred_raw[j],
-                "Residual": residual,
-                "Signed_Error": pred_raw[j] - actual_raw[j],
-                "Absolute_Error": abs(residual),
-            })
-
-    final_model = make_regressor()
-    final_model.fit(X, y)
-    feat_imp = pd.DataFrame({
-        "Feature": feature_cols,
-        "Importance": final_model.feature_importances_,
-    }).sort_values("Importance", ascending=False)
-    residuals = pd.DataFrame(resid_rows)
-
-    return {
-        "cv_mae": float(np.mean(mae_cv)),
-        "cv_mae_std": float(np.std(mae_cv)),
-        "cv_rmse": float(np.mean(rmse_cv)),
-        "cv_mean_error": float(residuals["Signed_Error"].mean()) if not residuals.empty else np.nan,
-        "cv_median_ae": float(residuals["Absolute_Error"].median()) if not residuals.empty else np.nan,
-        "cv_p90_ae": float(residuals["Absolute_Error"].quantile(0.90)) if not residuals.empty else np.nan,
-        "feat_imp": feat_imp,
-        "residuals": residuals,
-        "n_folds": len(splits),
-        "model": final_model,
-        "target_transform": "log1p raw caseload, z-scored within district",
-    }
-
-
-# =============================================================================
-# SECTION 6. FORECASTING AND UNCERTAINTY
-# Three recursive monthly forecasts, tree-based bounds, and district eligibility.
-# =============================================================================
-
-class Forecaster:
-    HORIZON = 3
-    # Engineered features computed at inference time. Keep in sync with build_features.
-    BASE = [
-        "Month", "Quarter", "Month_Sin", "Month_Cos",
-        "Lag1", "Lag2", "Lag3",
-        "Lag1_Z",
-        "Roll3_Mean", "Roll3_Std", "Roll6_Mean",
-        "Seasonal_Lag12",
-        "Hist_Mean", "Hist_Std", "Hist_P90", "Hist_P95",
-        "Lag1_Over_P95",
-        "Lag1_Ratio_P95",
-        "Recent_WD_High_Count", "WD_Score_Lag", "XD_Score_Lag",
-    ]
-
-    def fit(self, feat_df: pd.DataFrame, feature_cols: list[str], scalers: dict):
-        self.feature_cols = feature_cols
-        self.scalers = scalers
-        self.extra = [c for c in feature_cols if c not in self.BASE]
-
-        valid = feat_df.dropna(subset=["Target_Adm_Transformed"]).copy()
-        self.extra_vals = {}
-        for d in valid["District"].unique():
-            last = valid[valid["District"] == d].iloc[-1]
-            self.extra_vals[d] = {c: float(last.get(c, 0.0)) for c in self.extra}
-
-        self.reg = make_regressor()
-        self.reg.fit(valid[feature_cols].values, valid["Target_Adm_Transformed"].values)
-
-        # Restore classifier-driven within-district anomaly prediction for forecasts.
-        self.wd_clf = None
-        self.wd_thresholds = None
-        self.wd_le = None
-        wd_valid = valid[valid["Target_WD_Risk"].isin(RISK_LEVELS)].copy()
-        if not wd_valid.empty:
-            self.wd_le = RiskLabelEncoder()
-            wd_y = self.wd_le.transform(wd_valid["Target_WD_Risk"])
-            self.wd_clf = make_classifier("WD")
-            self.wd_clf.fit(wd_valid[feature_cols].values, wd_y)
-            self.wd_thresholds = tune_thresholds(wd_y, full_proba(self.wd_clf, wd_valid[feature_cols].values), "WD")
-        return self
-
-    def predict(self, df: pd.DataFrame, forecast_cutoff: pd.Timestamp | None = None) -> pd.DataFrame:
-        rows = []
-        severity_setup = get_severity_setup(df)
-        if forecast_cutoff is None:
-            forecast_cutoff = df.attrs.get("forecast_cutoff", df["Date"].max())
-        if pd.isna(forecast_cutoff):
-            return pd.DataFrame()
-        forecast_cutoff = pd.Timestamp(forecast_cutoff).to_period("M").to_timestamp()
-
-        for district in df["District_Name"].unique():
-            d = df[df["District_Name"] == district].sort_values("Date")
-            if len(d) < 3 or d["Date"].iloc[-1].to_period("M") != forecast_cutoff.to_period("M"):
-                continue
-
-            scaler = self.scalers.get(district)
-            if scaler is None:
-                continue
-            mu = scaler["feature_mean"]
-            sg = max(scaler["feature_std"], 1e-6)
-
-            hist_adm = list(d["Acut_Malnutrition"].astype(float).values)
-            hist_wd = list(d["wd_score"].values)
-            hist_xd = list(d["xd_score"].values)
-            extras = self.extra_vals.get(district, {c: 0.0 for c in self.extra})
-            total_pop_col = severity_setup["population_col"]
-            total_pop = np.nan
-            if total_pop_col is not None and total_pop_col in d.columns:
-                total_pop = pd.to_numeric(d[total_pop_col], errors="coerce").dropna().iloc[-1] if not d[total_pop_col].dropna().empty else np.nan
-
-            for step in range(1, self.HORIZON + 1):
-                fd = forecast_cutoff + pd.DateOffset(months=step)
-                hist = np.array(hist_adm, dtype=float)
-                roll3 = hist[-3:]
-                roll6 = hist[-6:] if len(hist) >= 6 else roll3
-                hist_mu = float(hist.mean())
-                hist_sd = float(hist.std()) if hist.std() > 1e-6 else 1.0
-                #p90, p95 = np.percentile(hist, [90, 95])
-                p75, p90, p95 = np.percentile(hist, [75, 90, 95])
-                lag1, lag2, lag3 = hist[-1], hist[-2], hist[-3]
-
-                base_raw = {
-                    # Calendar
-                    "Month": fd.month,
-                    "Quarter": fd.quarter,
-                    "Month_Sin": np.sin(2 * np.pi * fd.month / 12),
-                    "Month_Cos": np.cos(2 * np.pi * fd.month / 12),
-                    # Raw lags
-                    "Lag1": (lag1 - mu) / sg,
-                    "Lag2": (lag2 - mu) / sg,
-                    "Lag3": (lag3 - mu) / sg,
-                    # Standardised lag
-                    "Lag1_Z": (lag1 - hist_mu) / hist_sd,
-                    # Rolling windows
-                    "Roll3_Mean": (roll3.mean() - mu) / sg,
-                    "Roll3_Std": roll3.std(),
-                    "Roll6_Mean": (roll6.mean() - mu) / sg,
-                    # Seasonal reference
-                    "Seasonal_Lag12": (hist[-12] - mu) / sg if len(hist) >= 12 else (lag1 - mu) / sg,
-                    # Historical distribution
-                    "Hist_Mean": (hist_mu - mu) / sg,
-                    "Hist_Std": (hist_sd - mu) / sg,
-                    "Hist_P90": (p90 - mu) / sg,
-                    "Hist_P95": (p95 - mu) / sg,
-                    # Threshold exceedance / ratio
-                    "Lag1_Over_P95": (lag1 - p95) / sg,
-                    "Lag1_Ratio_P95": lag1 / (p95 + 1e-6),
-                    # Risk history
-                    "Recent_WD_High_Count": np.isin(hist_wd[-3:], [2, 3]).sum(),
-                    "WD_Score_Lag": hist_wd[-1],
-                    "XD_Score_Lag": hist_xd[-1],
-                }
-
-                fv = np.array([[{**base_raw, **extras}.get(c, 0.0) for c in self.feature_cols]])
-                pred_transformed = float(self.reg.predict(fv)[0])
-                pred_raw = round(inverse_regression_target(pred_transformed, scaler))
-
-                tree_preds = np.array([t.predict(fv)[0] for t in self.reg.estimators_])
-                tree_preds_raw = inverse_regression_target(tree_preds, scaler)
-                lo, hi = np.percentile(tree_preds_raw, [10, 90])
-                lo = max(0, round(lo))
-                hi = max(lo, round(hi))
-
-                p50 = np.percentile(hist, 50)
-                if self.wd_clf is not None and self.wd_thresholds is not None and self.wd_le is not None:
-                    wd_code = int(predict_with_thresholds(full_proba(self.wd_clf, fv), self.wd_thresholds)[0])
-                    wd_risk = self.wd_le.inverse_transform([wd_code])[0]
-                else:
-                    wd_risk = classify_risk(pred_raw, p50, p75, p90, p95)
-                pred_rate = pred_raw / total_pop * 100000 if pd.notna(total_pop) and total_pop > 0 else np.nan
-                lower_severity_phase = "No Data"
-                severity_phase = "No Data"
-                rows.append({
-                    "District": district,
-                    "Date": fd,
-                    "Month_Year": fd.strftime("%B %Y"),
-                    "Step": step,
-                    "Predicted": int(pred_raw),
-                    "Lower_80": int(lo),
-                    "Upper_80": int(hi),
-                    "WD_Risk": wd_risk,
-                    "XD_Risk": "No Data",
-                    "Composite_Risk": "No Data",
-                    "Operational_Alert": "No Data",
-                    "Operational_Alert_Why": "",
-                    "Severity_Prevalence_Pct": np.nan,
-                    "Severity_Phase": severity_phase,
-                    "Lower_Severity_Phase": lower_severity_phase,
-                    "Severity_Basis": severity_setup["forecast_note"],
-                    "Predicted_Caseload_per_100000_Pop": pred_rate,
-                })
-
-                hist_adm.append(pred_raw)
-                hist_wd.append(RISK_ORDER.get(wd_risk, 0))
-                hist_xd.append(0)
-
-        result = pd.DataFrame(rows)
-        if result.empty:
-            return result
-
-        all_hist_vals = df["Acut_Malnutrition"].dropna().values
-        for month_date in result["Date"].unique():
-            mask = result["Date"] == month_date
-            preds = result.loc[mask, "Predicted"].values
-            if len(preds) >= 3:
-                xp50, xp75, xp90, xp95 = np.percentile(preds, [50, 75, 90, 95])
-            else:
-                xp50, xp75, xp90, xp95 = np.percentile(all_hist_vals, [50, 75, 90, 95])
-            for idx in result[mask].index:
-                pred = result.loc[idx, "Predicted"]
-                xd_risk = classify_risk(pred, xp50, xp75, xp90, xp95)
-                wd_risk = result.loc[idx, "WD_Risk"]
-                severity_phase = result.loc[idx, "Severity_Phase"]
-                lower_severity_phase = result.loc[idx, "Lower_Severity_Phase"]
-                operational_alert = derive_operational_alert(wd_risk, xd_risk, severity_phase, lower_severity_phase)
-                operational_alert_why = explain_operational_alert(wd_risk, xd_risk, severity_phase, lower_severity_phase)
-                result.loc[idx, "XD_Risk"] = xd_risk
-                result.loc[idx, "Operational_Alert"] = operational_alert
-                result.loc[idx, "Operational_Alert_Why"] = operational_alert_why
-                result.loc[idx, "Composite_Risk"] = operational_alert
-
-        return result
-
-
-@st.cache_data(show_spinner=False)
-def run_forecast(feat_df, feature_cols, scalers, df, data_key, forecast_cutoff=None):
-    fc = Forecaster().fit(feat_df, feature_cols, scalers)
-    return fc.predict(df, forecast_cutoff)
-
-
-# =============================================================================
-# SECTION 7. ANALYSIS AND GEOSPATIAL VISUALIZATION (MAPS)
-# Match district boundaries and display observed/forecast anomaly and alert maps.
-# =============================================================================
 
 def load_and_match_geodf(geo_file, df: pd.DataFrame, name_col: str):
     gdf = gpd.read_file(geo_file)
@@ -2147,8 +2168,53 @@ def render_delta_map(gdf, fc_map, risk_col, months):
 
 # =============================================================================
 # SECTION 8. APPLICATION FLOW AND USER OUTPUTS
-# Connect inputs, cached results, filters, four tabs, tables, charts, and exports.
 # =============================================================================
+# Connect inputs, cached results, filters, four tabs, tables, charts, and exports.
+
+
+# =============================================================================
+# Forecast table and interface styles
+# =============================================================================
+
+
+def build_district_forecast_table(fc_df: pd.DataFrame, forecast_months, include_details: bool = False) -> pd.DataFrame:
+    """Show the common forecast horizon in one row per district."""
+    months = pd.DatetimeIndex(forecast_months).to_period("M")
+    metrics = {
+        "Predicted": "Forecast",
+        "Operational_Alert": "Alert",
+    }
+    if include_details:
+        metrics.update({
+            "Lower_80": "Lower 80%",
+            "Upper_80": "Upper 80%",
+            "WD_Risk": "Within Anomaly",
+            "XD_Risk": "Between Anomaly",
+            "Operational_Alert_Why": "Alert Reason",
+        })
+    if fc_df.empty:
+        return pd.DataFrame(columns=["District"] + [
+            f"{month.strftime('%b %Y')} {label}" for label in metrics.values() for month in months
+        ])
+
+    data = fc_df.copy()
+    data["Forecast_Month"] = pd.to_datetime(data["Date"]).dt.to_period("M")
+    available = [metric for metric in metrics if metric in data.columns]
+    pivot = data.pivot(index="District", columns="Forecast_Month", values=available)
+    summary = pd.DataFrame(index=pivot.index)
+    for metric in available:
+        values = pivot[metric].reindex(columns=months)
+        for month in months:
+            column = values[month]
+            if metric in {"Predicted", "Lower_80", "Upper_80"}:
+                column = column.astype("Int64")
+            elif metric in {"Operational_Alert", "WD_Risk", "XD_Risk"}:
+                column = column.fillna("No Data")
+            else:
+                column = column.fillna("")
+            summary[f"{month.strftime('%b %Y')} {metrics[metric]}"] = column
+    return summary.reset_index()
+
 
 def inject_app_styles():
     st.markdown(
@@ -2210,6 +2276,11 @@ def inject_app_styles():
         """,
         unsafe_allow_html=True,
     )
+
+
+# =============================================================================
+# Application orchestration
+# =============================================================================
 
 
 def main():
