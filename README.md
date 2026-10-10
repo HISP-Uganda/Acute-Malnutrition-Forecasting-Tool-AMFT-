@@ -95,7 +95,7 @@ The Streamlit app is organized into four main tabs:
 
 - 3-month district forecast chart
 - Hindcast view for prior out-of-sample predictions
-- Forecast table with uncertainty bounds
+- Forecast table with one row per district and all three monthly projections side by side; optional uncertainty bounds and anomaly details
 - Forecast anomaly and operational alert maps
 
 ### Model Checks
@@ -134,13 +134,13 @@ source venv/bin/activate
 ### 2. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ### 3. Run the app
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 The default local address is:
@@ -151,10 +151,16 @@ http://localhost:8501
 
 ## Running With Sample Data
 
-The app already points to local sample files by default:
+The app points to these local sample paths by default:
 
-- `data/sample/Acute_Malnutrition_data_district.csv`
-- `data/sample/uganda-districts_ug.geojson`
+- `data/sample/data.csv`
+- `data/sample/district_map.geojson`
+
+Both files are included in this checkout. Despite the CSV filename, its rows cover January 2021 through December 2025. Select `name` as the GeoJSON district column; its district labels match the CSV.
+
+Missing caseloads are excluded from observed analysis rather than treated as zero. Feature rows with missing covariates are excluded from training. Districts with too little usable history may have no forecast, and sparse histories limit forecast reliability.
+
+All forward forecasts use a common cutoff: the latest valid reporting month in the source CSV, including rows with missing caseloads. For this sample the cutoff is December 2025, so the chart, table, maps, and CSV export forecast January, February, and March 2026. Districts without an observed caseload at the cutoff are excluded from forecasts and shown as `No Data` on maps. District filtering keeps the same cutoff. Historical hindcasts remain separate.
 
 In the sidebar you can choose either:
 
@@ -167,6 +173,8 @@ When a GeoJSON is provided, the app asks you to select the district name column 
 
 ### Required columns
 
+The loader requires `Region_District`, `time_period`, and `Acut_Malnutrition`. `District` and `Region` are optional: when absent, labels are derived from `Region_District`. Numeric covariates are optional, and the supplied sample uses the following schema:
+
 | Column | Description |
 |---|---|
 | `Region_District` | Region and district label, for example `Acholi|Agago District` |
@@ -178,13 +186,15 @@ When a GeoJSON is provided, the app asks you to select the district name column 
 | `rainfall` | Rainfall |
 | `mean_relative_humidity` | Relative humidity |
 | `average_gpp` | Vegetation productivity |
-| `malaria_confirmed` | Confirmed malaria cases |
-| `pneumonia_cases` | Pneumonia cases |
-| `pregnant_women_with_Anaemia` | Anaemia cases among pregnant women |
-| `diarrhea_acute` | Acute diarrhoea cases |
+| `malaria_confirmed_u5` | Confirmed malaria cases in children under five |
+| `pneumonia_cases_u5` | Pneumonia cases in children under five |
+| `diarrhea_u5` | Diarrhoea cases in children under five |
 | `low_birth_weight_babies` | Low birth weight babies |
-| `diarrhea_persistent` | Persistent diarrhoea cases |
-| `population` | District population |
+| `screened_u5` | Children under five screened |
+| `reporting_rate` | Reporting rate, in the source file's units |
+| `population_u5` | District population under five |
+
+The app also supports the older covariates `malaria_confirmed`, `pneumonia_cases`, `pregnant_women_with_Anaemia`, `diarrhea_acute`, `diarrhea_persistent`, and `population` when supplied. Under-five columns retain their own names and labels. `population_u5` is a model covariate, not a substitute for total population; the per-100,000 population outputs require `population` or `totalpopulation`.
 
 ### Optional severity columns
 
@@ -230,6 +240,7 @@ The model pipeline uses:
 
 - classified observed CSV
 - forecast CSV
+- district summary CSV with one row per district (matches the displayed table)
 - within-district anomaly metrics CSV
 - between-district anomaly metrics CSV
 
@@ -267,28 +278,44 @@ The forecast tab includes district forecast charts, forecast tables, and forecas
 
 ## Troubleshooting
 
+### NumPy `incompatible architecture` on Apple Silicon
+
+If the traceback says `have 'x86_64', need 'arm64'`, an Intel NumPy binary is being loaded by ARM Python. Create a fresh project environment and install dependencies with that environment's Python:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --no-cache-dir -r requirements.txt
+python -m streamlit run app.py
+```
+
+If `.venv` already exists and has the same architecture error, use a new environment directory such as `.venv-arm64` in the first two commands. This leaves the existing environment intact.
+
+Activate the environment again in each new terminal before running the app. Use the Streamlit command above to start the web interface.
+
 ### `streamlit: command not found`
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 or
 
 ```bash
-pip install streamlit
+python -m pip install streamlit
 ```
 
 ### Port already in use
 
 ```bash
-streamlit run app.py --server.port 8502
+python -m streamlit run app.py --server.port 8502
 ```
 
 ### Missing package errors
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ## Project Structure
