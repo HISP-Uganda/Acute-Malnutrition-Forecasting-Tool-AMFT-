@@ -1,3 +1,18 @@
+#  1. Setup and helper functions
+# 2. Data loading and quality checks
+# 3. Anomaly and operational alert rules
+# 4. Target preparation and feature engineering
+# 5. Model training and evaluation
+# 6. Forecasting and uncertainty
+# 7. Analysis and geospatial visualization
+# 8. Application flow and user outputs
+# Related helpers may appear before the main block for their group.
+
+# =============================================================================
+# SECTION 1. SETUP AND HELPER FUNCTIONS
+# Libraries, input paths, covariates, labels, colours, and shared helpers.
+# =============================================================================
+
 import calendar
 import hashlib
 from itertools import product
@@ -9,6 +24,10 @@ from io import StringIO
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib")
 
 import geopandas as gpd
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,14 +52,14 @@ warnings.filterwarnings("ignore")
 
 
 # =============================================================================
-# CONFIG
+# Configuration
 # =============================================================================
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = APP_DIR if os.path.isdir(os.path.join(APP_DIR, "data", "sample")) else os.path.dirname(APP_DIR)
-DEFAULT_CSV_PATH = os.path.join(PROJECT_ROOT, "data", "sample", "Acute_Malnutrition_data_district.csv")
-DEFAULT_GEOJSON_PATH = os.path.join(PROJECT_ROOT, "data", "sample", "uganda-districts_ug.geojson")
-MODEL_SCHEMA_VERSION = "anomaly-4level-v5"
+DEFAULT_CSV_PATH = os.path.join(PROJECT_ROOT, "data", "sample", "data.csv")
+DEFAULT_GEOJSON_PATH = os.path.join(PROJECT_ROOT, "data", "sample", "district_map.geojson")
+MODEL_SCHEMA_VERSION = "anomaly-4level-v7"
 
 RISK_LEVELS = ["Low", "Moderate", "High", "Extreme"]
 RISK_ORDER = {
@@ -86,6 +105,11 @@ ANOMALY_GUIDANCE = {
 }
 
 SKEWED_COVS = [
+    "malaria_confirmed_u5",
+    "pneumonia_cases_u5",
+    "diarrhea_u5",
+    "screened_u5",
+    "population_u5",
     "malaria_confirmed",
     "pneumonia_cases",
     "pregnant_women_with_Anaemia",
@@ -100,6 +124,12 @@ FEATURE_COLS_NEW = [
     "rainfall",
     "mean_relative_humidity",
     "average_gpp",
+    "malaria_confirmed_u5",
+    "pneumonia_cases_u5",
+    "diarrhea_u5",
+    "screened_u5",
+    "reporting_rate",
+    "population_u5",
     "malaria_confirmed",
     "pneumonia_cases",
     "pregnant_women_with_Anaemia",
@@ -114,6 +144,12 @@ NICE_NAMES = {
     "rainfall": "Rainfall",
     "mean_relative_humidity": "Relative Humidity",
     "average_gpp": "Avg GPP",
+    "malaria_confirmed_u5": "Malaria Confirmed (Under 5)",
+    "pneumonia_cases_u5": "Pneumonia Cases (Under 5)",
+    "diarrhea_u5": "Diarrhoea Cases (Under 5)",
+    "screened_u5": "Children Screened (Under 5)",
+    "reporting_rate": "Reporting Rate",
+    "population_u5": "Population (Under 5)",
     "malaria_confirmed": "Malaria Confirmed",
     "pneumonia_cases": "Pneumonia Cases",
     "pregnant_women_with_Anaemia": "Pregnant Women w/ Anaemia",
@@ -194,7 +230,7 @@ _EXCLUDE_FROM_FEATURES = {
 
 
 # =============================================================================
-# FIXED RISK ENCODER
+# Fixed-order risk encoding
 # =============================================================================
 
 class RiskLabelEncoder:
@@ -210,7 +246,7 @@ class RiskLabelEncoder:
 
 
 # =============================================================================
-# UTILITIES
+# Shared date, display, and summary helpers
 # =============================================================================
 
 def parse_date(s: str) -> pd.Timestamp:
@@ -233,6 +269,45 @@ def display_label(col: str) -> str:
 
 def rename_for_display(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={c: display_label(c) for c in df.columns})
+
+
+def build_district_forecast_table(fc_df: pd.DataFrame, forecast_months, include_details: bool = False) -> pd.DataFrame:
+    """Show the common forecast horizon in one row per district."""
+    months = pd.DatetimeIndex(forecast_months).to_period("M")
+    metrics = {
+        "Predicted": "Forecast",
+        "Operational_Alert": "Alert",
+    }
+    if include_details:
+        metrics.update({
+            "Lower_80": "Lower 80%",
+            "Upper_80": "Upper 80%",
+            "WD_Risk": "Within Anomaly",
+            "XD_Risk": "Between Anomaly",
+            "Operational_Alert_Why": "Alert Reason",
+        })
+    if fc_df.empty:
+        return pd.DataFrame(columns=["District"] + [
+            f"{month.strftime('%b %Y')} {label}" for label in metrics.values() for month in months
+        ])
+
+    data = fc_df.copy()
+    data["Forecast_Month"] = pd.to_datetime(data["Date"]).dt.to_period("M")
+    available = [metric for metric in metrics if metric in data.columns]
+    pivot = data.pivot(index="District", columns="Forecast_Month", values=available)
+    summary = pd.DataFrame(index=pivot.index)
+    for metric in available:
+        values = pivot[metric].reindex(columns=months)
+        for month in months:
+            column = values[month]
+            if metric in {"Predicted", "Lower_80", "Upper_80"}:
+                column = column.astype("Int64")
+            elif metric in {"Operational_Alert", "WD_Risk", "XD_Risk"}:
+                column = column.fillna("No Data")
+            else:
+                column = column.fillna("")
+            summary[f"{month.strftime('%b %Y')} {metrics[metric]}"] = column
+    return summary.reset_index()
 
 
 def build_phase_count_table(values: pd.Series, levels: list[str] | None = None, label: str = "Classification") -> pd.DataFrame:
@@ -291,6 +366,11 @@ def build_alert_comparison_table(df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(rows)
 
+
+# =============================================================================
+# SECTION 3. ANOMALY AND OPERATIONAL ALERT RULES
+# Percentile anomaly levels, alert combinations, explanations, and optional severity.
+# =============================================================================
 
 def ordered_levels_for_col(col: str) -> list[str]:
     if col in {"Operational_Alert", "Composite_Risk"}:
@@ -525,6 +605,11 @@ def get_denominator_source_short(severity_setup: dict) -> str:
     return "Unavailable"
 
 
+# =============================================================================
+# SECTION 2. DATA LOADING AND QUALITY CHECKS (SUMMARIES)
+# Explain methodology and report completeness, duplicates, missingness, and outliers.
+# =============================================================================
+
 def build_methodology_df(df: pd.DataFrame) -> pd.DataFrame:
     severity_setup = get_severity_setup(df)
     rows = [
@@ -665,6 +750,11 @@ def compute_data_quality_tables(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, p
     return summary, district_quality, monthly
 
 
+# =============================================================================
+# SECTION 4. TARGET PREPARATION AND FEATURE ENGINEERING (HELPERS)
+# Log and inverse transformations used by the case-count model.
+# =============================================================================
+
 def apply_log_transform(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     df = df.copy()
     for col in cols:
@@ -780,6 +870,11 @@ def colour_alert_summary_df(df: pd.DataFrame):
     return df.style.apply(_style_row, axis=1)
 
 
+# =============================================================================
+# SECTION 5. MODEL TRAINING AND EVALUATION (METRIC HELPERS)
+# Calculate per-class diagnostic measures from observed and predicted labels.
+# =============================================================================
+
 def compute_per_class_metrics(all_true: list[int], all_pred: list[int]) -> dict:
     conf = confusion_matrix(all_true, all_pred, labels=list(range(len(RISK_LEVELS))))
     report = classification_report(
@@ -822,6 +917,11 @@ def compute_per_class_metrics(all_true: list[int], all_pred: list[int]) -> dict:
         })
     return {"per_class": rows, "conf_matrix": conf, "report": report}
 
+
+# =============================================================================
+# SECTION 7. ANALYSIS AND GEOSPATIAL VISUALIZATION (ANALYSIS)
+# Correlations, district/region comparisons, and historical anomaly trends.
+# =============================================================================
 
 def compute_spearman_correlations(data_slice: pd.DataFrame):
     target = "Acut_Malnutrition"
@@ -1209,7 +1309,8 @@ def render_historical_risk_trend(df: pd.DataFrame, scope_label: str = "All Distr
 
 
 # =============================================================================
-# DATA LOADING AND DISTRICT RISK CLASSIFICATION
+# SECTION 2. DATA LOADING AND QUALITY CHECKS (CSV LOADING)
+# Read inputs, prepare district/date fields, and retain the shared cutoff.
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
@@ -1230,6 +1331,8 @@ def load_data_from_df(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {missing}")
 
     df["Date"] = df["time_period"].apply(parse_date)
+    # Keep the source cutoff even when the latest month has missing caseloads.
+    forecast_cutoff = df["Date"].max()
     df = df.dropna(subset=["Date", "Acut_Malnutrition"]).copy()
 
     raw_rd = df["Region_District"].astype(str).str.strip()
@@ -1328,12 +1431,14 @@ def load_data_from_df(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["month"] = df["Date"].dt.month
     df["quarter"] = df["Date"].dt.quarter
+    df.attrs["forecast_cutoff"] = forecast_cutoff
 
     return df.reset_index(drop=True)
 
 
 # =============================================================================
-# FEATURE ENGINEERING  (pruned)
+# SECTION 4. TARGET PREPARATION AND FEATURE ENGINEERING
+# Build historical predictors and transform the GAM case-count target.
 # =============================================================================
 #
 # Removed lower-importance / redundant engineered features:
@@ -1342,11 +1447,11 @@ def load_data_from_df(df: pd.DataFrame) -> pd.DataFrame:
 # Hist_P90 is retained because it helps separate High from Extreme conditions.
 
 @st.cache_data(show_spinner=False)
-def build_features(_df: pd.DataFrame):
+def build_features(df: pd.DataFrame):
     records = []
 
-    for district in _df["District_Name"].unique():
-        d = _df[_df["District_Name"] == district].sort_values("Date").reset_index(drop=True)
+    for district in df["District_Name"].unique():
+        d = df[df["District_Name"] == district].sort_values("Date").reset_index(drop=True)
         adm = d["Acut_Malnutrition"].astype(float).values
 
         for i in range(3, len(d)):
@@ -1435,13 +1540,14 @@ def build_features(_df: pd.DataFrame):
         baseline = feat_df.loc[mask, "Lag1"].astype(float)
         feature_mu = float(baseline.mean())
         feature_std = float(baseline.std())
-        if feature_std < 1e-6:
+        # Sample standard deviation is NaN when only one usable row remains.
+        if not np.isfinite(feature_std) or feature_std < 1e-6:
             feature_std = 1.0
 
         target_log = transform_regression_target(feat_df.loc[mask, "Target_Adm"].astype(float))
         target_mu = float(target_log.mean())
         target_std = float(target_log.std())
-        if target_std < 1e-6:
+        if not np.isfinite(target_std) or target_std < 1e-6:
             target_std = 1.0
 
         scalers[district] = {
@@ -1474,12 +1580,13 @@ def build_features(_df: pd.DataFrame):
 
 
 # =============================================================================
-# WALK-FORWARD CV AND MODELS
+# SECTION 5. MODEL TRAINING AND EVALUATION
+# Random Forest factories, chronological validation, and performance metrics.
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
-def wf_splits(_feat_df: pd.DataFrame, n_splits: int = 6, min_months: int = 12):
-    dates = sorted(_feat_df["Date"].unique())
+def wf_splits(feat_df: pd.DataFrame, n_splits: int = 6, min_months: int = 12):
+    dates = sorted(feat_df["Date"].unique())
     n = len(dates)
     if n < min_months + 2:
         return []
@@ -1494,8 +1601,8 @@ def wf_splits(_feat_df: pd.DataFrame, n_splits: int = 6, min_months: int = 12):
         if ci >= n - 1:
             break
         te = min(ci + step, n - 1)
-        tr_i = _feat_df[_feat_df["Date"].isin(dates[:ci])].index
-        te_i = _feat_df[_feat_df["Date"].isin(dates[ci:te])].index
+        tr_i = feat_df[feat_df["Date"].isin(dates[:ci])].index
+        te_i = feat_df[feat_df["Date"].isin(dates[ci:te])].index
         if len(tr_i) >= 10 and len(te_i) >= 5:
             splits.append((tr_i, te_i))
     return splits
@@ -1604,10 +1711,10 @@ def full_proba(model, X: np.ndarray) -> np.ndarray:
 
 
 @st.cache_data(show_spinner=False)
-def run_classification(_feat_df: pd.DataFrame, feature_cols: list[str], target: str = "WD"):
+def run_classification(feat_df: pd.DataFrame, feature_cols: list[str], target: str = "WD"):
     target_col = f"Target_{target}_Risk"
     le = RiskLabelEncoder()
-    valid = _feat_df[_feat_df[target_col].isin(RISK_LEVELS)].copy().reset_index(drop=True)
+    valid = feat_df[feat_df[target_col].isin(RISK_LEVELS)].copy().reset_index(drop=True)
     valid["y"] = le.transform(valid[target_col])
 
     X = valid[feature_cols].values
@@ -1668,8 +1775,8 @@ def run_classification(_feat_df: pd.DataFrame, feature_cols: list[str], target: 
 
 
 @st.cache_data(show_spinner=False)
-def run_regression_cv(_feat_df: pd.DataFrame, feature_cols: list[str], _scalers: dict):
-    valid = _feat_df.dropna(subset=["Target_Adm_Transformed"]).copy().reset_index(drop=True)
+def run_regression_cv(feat_df: pd.DataFrame, feature_cols: list[str], scalers: dict):
+    valid = feat_df.dropna(subset=["Target_Adm_Transformed"]).copy().reset_index(drop=True)
     X = valid[feature_cols].values
     y = valid["Target_Adm_Transformed"].values
     splits = wf_splits(valid)
@@ -1691,7 +1798,7 @@ def run_regression_cv(_feat_df: pd.DataFrame, feature_cols: list[str], _scalers:
         meta = valid.iloc[te_p]
         actual_raw = meta["Target_Adm"].values
         pred_raw = np.array([
-            inverse_regression_target(pred_transformed[j], _scalers[meta.iloc[j]["District"]])
+            inverse_regression_target(pred_transformed[j], scalers[meta.iloc[j]["District"]])
             for j in range(len(te_p))
         ])
 
@@ -1735,7 +1842,8 @@ def run_regression_cv(_feat_df: pd.DataFrame, feature_cols: list[str], _scalers:
 
 
 # =============================================================================
-# FORECASTING
+# SECTION 6. FORECASTING AND UNCERTAINTY
+# Three recursive monthly forecasts, tree-based bounds, and district eligibility.
 # =============================================================================
 
 class Forecaster:
@@ -1780,13 +1888,18 @@ class Forecaster:
             self.wd_thresholds = tune_thresholds(wd_y, full_proba(self.wd_clf, wd_valid[feature_cols].values), "WD")
         return self
 
-    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+    def predict(self, df: pd.DataFrame, forecast_cutoff: pd.Timestamp | None = None) -> pd.DataFrame:
         rows = []
         severity_setup = get_severity_setup(df)
+        if forecast_cutoff is None:
+            forecast_cutoff = df.attrs.get("forecast_cutoff", df["Date"].max())
+        if pd.isna(forecast_cutoff):
+            return pd.DataFrame()
+        forecast_cutoff = pd.Timestamp(forecast_cutoff).to_period("M").to_timestamp()
 
         for district in df["District_Name"].unique():
             d = df[df["District_Name"] == district].sort_values("Date")
-            if len(d) < 3:
+            if len(d) < 3 or d["Date"].iloc[-1].to_period("M") != forecast_cutoff.to_period("M"):
                 continue
 
             scaler = self.scalers.get(district)
@@ -1798,7 +1911,6 @@ class Forecaster:
             hist_adm = list(d["Acut_Malnutrition"].astype(float).values)
             hist_wd = list(d["wd_score"].values)
             hist_xd = list(d["xd_score"].values)
-            last_date = d["Date"].iloc[-1]
             extras = self.extra_vals.get(district, {c: 0.0 for c in self.extra})
             total_pop_col = severity_setup["population_col"]
             total_pop = np.nan
@@ -1806,7 +1918,7 @@ class Forecaster:
                 total_pop = pd.to_numeric(d[total_pop_col], errors="coerce").dropna().iloc[-1] if not d[total_pop_col].dropna().empty else np.nan
 
             for step in range(1, self.HORIZON + 1):
-                fd = last_date + pd.DateOffset(months=step)
+                fd = forecast_cutoff + pd.DateOffset(months=step)
                 hist = np.array(hist_adm, dtype=float)
                 roll3 = hist[-3:]
                 roll6 = hist[-6:] if len(hist) >= 6 else roll3
@@ -1920,13 +2032,14 @@ class Forecaster:
 
 
 @st.cache_data(show_spinner=False)
-def run_forecast(_feat_df, feature_cols, _scalers, _df, data_key):
-    fc = Forecaster().fit(_feat_df, feature_cols, _scalers)
-    return fc.predict(_df)
+def run_forecast(feat_df, feature_cols, scalers, df, data_key, forecast_cutoff=None):
+    fc = Forecaster().fit(feat_df, feature_cols, scalers)
+    return fc.predict(df, forecast_cutoff)
 
 
 # =============================================================================
-# MAPS
+# SECTION 7. ANALYSIS AND GEOSPATIAL VISUALIZATION (MAPS)
+# Match district boundaries and display observed/forecast anomaly and alert maps.
 # =============================================================================
 
 def load_and_match_geodf(geo_file, df: pd.DataFrame, name_col: str):
@@ -1947,17 +2060,33 @@ def load_and_match_geodf(geo_file, df: pd.DataFrame, name_col: str):
     return gdf, matched
 
 
+def fit_district_map_layout(fig, title: str):
+    """Fit all district polygons to each panel's available width."""
+    fig.update_layout(
+        geo=dict(fitbounds="locations", visible=False, projection_type="mercator"),
+        height=450,
+        margin=dict(l=0, r=0, t=58, b=88),
+        title=dict(text=title.replace(" - ", "<br>", 1), x=0.02, xanchor="left", font=dict(size=14)),
+        legend=dict(
+            orientation="h", x=0, xanchor="left", y=-0.04, yanchor="top",
+            title_text="", font=dict(size=11), entrywidth=90,
+        ),
+    )
+
+
 def render_map(gdf, data, risk_col, title, hover_cols=None):
     merged = gdf.merge(data, on="District_Name", how="left")
-    levels = ordered_levels_for_col(risk_col)
+    levels = ordered_levels_for_col(risk_col) + ["No Data"]
     if risk_col in merged.columns:
-        merged[risk_col] = pd.Categorical(merged[risk_col], categories=levels, ordered=True)
+        merged[risk_col] = pd.Categorical(
+            merged[risk_col].astype(object).fillna("No Data"), categories=levels, ordered=True,
+        )
     gj = safe_geojson(merged)
     hover_cols = hover_cols or []
     hover_data = {c: True for c in hover_cols if c in merged.columns}
     hover_data[risk_col] = True
 
-    fig = px.choropleth_mapbox(
+    fig = px.choropleth(
         merged,
         geojson=gj,
         locations=merged.index,
@@ -1965,14 +2094,11 @@ def render_map(gdf, data, risk_col, title, hover_cols=None):
         color_discrete_map=RISK_COLORS,
         category_orders={risk_col: levels},
         labels={risk_col: display_label(risk_col)},
-        zoom=5.1,
-        center={"lat": 1.37, "lon": 32.29},
-        mapbox_style="carto-positron",
         hover_name="District_Name",
         hover_data=hover_data,
         title=title,
     )
-    fig.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0}, height=360)
+    fit_district_map_layout(fig, title)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -2005,68 +2131,80 @@ def render_delta_map(gdf, fc_map, risk_col, months):
         "+4": "#7f2704",
     }
     gj = safe_geojson(merged)
-    fig = px.choropleth_mapbox(
+    fig = px.choropleth(
         merged,
         geojson=gj,
         locations=merged.index,
         color="Delta_Label",
         color_discrete_map=color_map,
-        zoom=5.1,
-        center={"lat": 1.37, "lon": 32.29},
-        mapbox_style="carto-positron",
         hover_name="District_Name",
         hover_data={"Risk_First": True, "Risk_Last": True, "Direction": True, "Delta_Label": True},
         title=f"Risk Change: {first} to {last}",
     )
-    fig.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0}, height=380)
+    fit_district_map_layout(fig, f"Risk Change - {first} to {last}")
     st.plotly_chart(fig, use_container_width=True)
 
 
 # =============================================================================
-# APP
+# SECTION 8. APPLICATION FLOW AND USER OUTPUTS
+# Connect inputs, cached results, filters, four tabs, tables, charts, and exports.
 # =============================================================================
 
 def inject_app_styles():
     st.markdown(
         """
         <style>
-        div[data-baseweb="tab-list"] {
-            gap: 0.45rem;
+        [data-testid="stTabs"] [role="tablist"] {
+            gap: 0.6rem;
             background: #eef4f8;
-            padding: 0.35rem;
+            padding: 0.5rem;
             border-radius: 0.9rem;
             border: 1px solid #d4e0e8;
             margin-bottom: 0.85rem;
+            overflow-x: auto;
         }
 
-        button[data-baseweb="tab"] {
-            min-height: 2.8rem;
-            padding: 0.55rem 1rem;
+        [data-testid="stTabs"] [role="tab"] {
+            flex: 1 0 auto;
+            min-height: 3.4rem;
+            padding: 0.75rem 1.2rem;
             border-radius: 0.7rem;
-            border: 1px solid transparent;
-            background: #f8fbfd;
-            color: #234;
-            font-size: 1rem;
-            font-weight: 700;
-            transition: all 0.18s ease;
-        }
-
-        button[data-baseweb="tab"]:hover {
-            background: #e3eef6;
+            border: 1px solid #b8cfde;
+            background: #ffffff;
             color: #12344d;
-            border-color: #b8cfde;
+            font-size: 1.05rem;
+            font-weight: 700;
+            white-space: nowrap;
+            transition: background-color 0.18s ease, box-shadow 0.18s ease;
         }
 
-        button[data-baseweb="tab"][aria-selected="true"] {
+        [data-testid="stTabs"] [role="tab"]:hover {
+            background: #dceaf4;
+            border-color: #1f5f8b;
+        }
+
+        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
             background: #1f5f8b;
             color: #ffffff;
             border-color: #1f5f8b;
-            box-shadow: 0 6px 16px rgba(31, 95, 139, 0.18);
+            box-shadow: 0 3px 8px rgba(31, 95, 139, 0.2);
         }
 
-        button[data-baseweb="tab"] p {
-            font-size: 1rem;
+        [data-testid="stTabs"] [role="tab"]:focus-visible {
+            outline: 3px solid #1f5f8b;
+            outline-offset: 2px;
+        }
+
+        [data-testid="stTabs"] [role="tab"] p {
+            color: inherit;
+            font-size: 1.05rem;
             font-weight: 700;
+        }
+
+        [data-testid="stTabs"] .react-aria-SelectionIndicator,
+        [data-testid="stTabs"] [data-baseweb="tab-highlight"],
+        [data-testid="stTabs"] [data-baseweb="tab-border"] {
+            display: none;
         }
         </style>
         """,
@@ -2136,6 +2274,8 @@ def main():
         return
 
     df = ensure_observed_alert_columns(df)
+    forecast_cutoff = pd.Timestamp(df.attrs.get("forecast_cutoff", df["Date"].max())).to_period("M").to_timestamp()
+    forecast_months = pd.date_range(forecast_cutoff + pd.DateOffset(months=1), periods=Forecaster.HORIZON, freq="MS")
 
     with st.spinner("Engineering district-relative features..."):
         feat_df, feature_cols, scalers = build_features(df)
@@ -2148,7 +2288,7 @@ def main():
             st.session_state["reg_eval"] = run_regression_cv(feat_df, feature_cols, scalers)
             st.session_state["clf_wd"] = run_classification(feat_df, feature_cols, target="WD")
             st.session_state["clf_xd"] = run_classification(feat_df, feature_cols, target="XD")
-            st.session_state["fc_df"] = run_forecast(feat_df, feature_cols, scalers, df, data_key)
+            st.session_state["fc_df"] = run_forecast(feat_df, feature_cols, scalers, df, data_key, forecast_cutoff)
             st.session_state["_data_key"] = data_key
             st.session_state["_model_schema_version"] = MODEL_SCHEMA_VERSION
 
@@ -2359,12 +2499,20 @@ def main():
             st.download_button("Download classified CSV", view_df[show_cols].to_csv(index=False), "classified_acute_malnutrition.csv")
 
     with tab_forecast:
+        st.caption(f"Forecast cutoff: {forecast_cutoff.strftime('%B %Y')}. All forward forecasts use the next three calendar months.")
+        last_observed = view_df.groupby("District_Name")["Date"].max()
+        stale_count = int((last_observed.dt.to_period("M") < forecast_cutoff.to_period("M")).sum())
+        if stale_count:
+            st.warning(
+                f"{stale_count} selected districts have no observed caseload for {forecast_cutoff.strftime('%B %Y')}; "
+                "they are excluded from forecasts and shown as No Data on the maps."
+            )
         if view_fc_df.empty:
             with st.expander("3-Month District Forecast", expanded=True):
                 st.warning("No forecast produced.")
         else:
             with st.expander("3-Month District Forecast", expanded=True):
-                st.success(", ".join(view_fc_df["Month_Year"].unique().tolist()))
+                st.success(", ".join(forecast_months.strftime("%B %Y")))
                 st.caption("Forecast maps and tables use the early-warning anomaly scale and Operational Alert.")
                 resid_source = scoped_reg_eval.get("residuals", pd.DataFrame()).copy() if "error" not in scoped_reg_eval else pd.DataFrame()
 
@@ -2486,22 +2634,21 @@ def main():
             with st.expander("District Forecast Table", expanded=True):
                 display = view_fc_df.copy()
                 display["Date"] = display["Date"].dt.strftime("%Y-%m-%d")
-                st.caption("Operational Alert uses the within-district and between-district anomaly combination rule.")
-                risk_cols = [c for c in ["WD_Risk", "XD_Risk", "Operational_Alert"] if c in display.columns]
-                display_cols = [
-                    "District", "Date", "Predicted", "Lower_80", "Upper_80",
-                    "WD_Risk", "XD_Risk", "Operational_Alert", "Operational_Alert_Why",
-                ]
-                display_cols = [c for c in display_cols if c in display.columns]
-                display_view = rename_for_display(display[display_cols])
-                display_risk_cols = [display_label(c) for c in risk_cols if c in display_cols]
-                st.dataframe(colour_risk_df(display_view.style, display_risk_cols), use_container_width=True, hide_index=True, height=480)
+                st.caption("One row per district shows all three monthly GAM caseload projections and operational alerts.")
+                show_details = st.checkbox("Show uncertainty bounds and anomaly details", value=False, key="forecast_table_details")
+                display_view = build_district_forecast_table(view_fc_df, forecast_months, include_details=show_details)
+                display_risk_cols = [c for c in display_view.columns if c.endswith((" Alert", " Anomaly"))]
+                st.dataframe(
+                    colour_risk_df(display_view.style, display_risk_cols),
+                    use_container_width=True, hide_index=True, height=480,
+                )
                 if use_all_districts:
                     download_name = "acute_malnutrition_forecast.csv"
                 elif len(active_districts) == 1:
                     download_name = f"acute_malnutrition_forecast_{active_districts[0]}.csv"
                 else:
                     download_name = "acute_malnutrition_forecast_selected_districts.csv"
+                st.download_button("Download district summary CSV", display_view.to_csv(index=False), download_name.replace(".csv", "_summary.csv"))
                 st.download_button("Download forecast CSV", display.to_csv(index=False), download_name)
 
             with st.expander("Forecast Anomaly & Operational Alert Maps", expanded=True):
@@ -2524,11 +2671,7 @@ def main():
                             if fc_map.empty:
                                 st.info("No forecast map data available for the selected district.")
                             else:
-                                months = (
-                                    fc_map.sort_values("Date")["Month_Year"]
-                                    .drop_duplicates()
-                                    .tolist()[:3]
-                                )
+                                months = forecast_months.strftime("%B %Y").tolist()
                                 map_cols = [
                                     ("WD_Risk", "Within-District Anomaly"),
                                     ("XD_Risk", "Between-Districts Anomaly"),
