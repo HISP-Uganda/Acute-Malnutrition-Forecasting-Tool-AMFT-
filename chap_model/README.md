@@ -17,14 +17,9 @@ Training and historic CSV files use:
 - `time_period` in monthly `YYYY-MM` format
 - `location`
 - `disease_cases`, containing reported GAM cases
-- `screened_u5`, containing assessed children under five
-- the covariates declared in `MLproject`
+- available covariates declared in `MLproject`, including `screened_u5` for assessed children under five
 
-The CHAP target is the observed GAM detection rate per 1,000 assessed children:
-
-```text
-disease_cases / screened_u5 * 1,000
-```
+The CHAP target is observed GAM caseload (SAM + MAM). `disease_cases` remains in case-count units throughout target preparation, and predictions are restored to case counts after the model's internal `log1p` transformation. `screened_u5` is an optional predictor of screening activity; it is not used to divide the target.
 
 The declared covariates are:
 
@@ -42,7 +37,7 @@ The declared covariates are:
 
 Prediction receives historic data with the observed fields and future data containing `time_period`, `location`, and available covariates. Missing covariates are handled causally with a one-month forward fill followed by past-only location-month, location, and global medians. Missing and outlier indicator features preserve data-quality information.
 
-The target is excluded when GAM is missing or negative, assessed children are missing or non-positive, GAM exceeds assessed children, a location-month is duplicated, or its 95% Wilson interval is wider than 125 detections per 1,000.
+The target is excluded when GAM is missing, negative, or non-finite, or a location-month is duplicated. Missing targets are never imputed. Suspicious target spikes are flagged for quality review and retained as observed counts. Missing or invalid screening values are handled as covariate-quality issues and do not exclude GAM counts; counts are also retained when they exceed reported screening volume.
 
 ## Forecast behavior
 
@@ -54,15 +49,29 @@ Default prediction output contains:
 - `location`
 - `sample_0` through `sample_99`
 
-Each sample is derived from an individual tree prediction. Sparse locations receive a finite training-derived fallback distribution because CHAP requires finite samples for every requested row.
+Each sample is derived from an individual tree prediction and represents GAM cases. Sparse locations receive a finite training-derived fallback distribution in the same case-count units because CHAP requires finite samples for every requested row.
 
-Set `CHAP_INCLUDE_RISK_OUTPUT=1` to append `point_forecast`, `operational_alert`, and `operational_alert_code`. Direct horizons with at least nine valid historic months use district p90/p95 thresholds:
+Set `CHAP_INCLUDE_RISK_OUTPUT=1` to append `point_forecast` in GAM cases, `operational_alert`, and `operational_alert_code`. Direct horizons with at least nine valid historic months compare forecast counts with district historical case-count p90/p95 thresholds:
 
 - `Monitor`: below p90
 - `Alert`: p90 to below p95
 - `Respond`: p95 or above
 
 The +2 bridge and locations without sufficient history remain `No Data` in enriched alert fields.
+
+Saved models trained on the previous detection-rate target are incompatible with the case-count model and must be retrained. Prediction rejects them with a retraining message to prevent mixing units.
+
+## Within-district and between-district anomalies
+
+CHAP uses `RandomForestRegressor` for GAM forecasting. It does not train or run a `RandomForestClassifier` for anomaly prediction.
+
+Within-district alerts are the optional p90/p95 comparisons described above: the mean forecast is compared with that district's valid historical GAM case counts. Despite its name, `operational_alert` represents this within-district comparison alone. It is not produced by combining within-district and between-district anomaly labels.
+
+Between-district anomaly detection is not implemented in CHAP. The prediction output does not contain separate within-district or between-district anomaly-label columns. Default output contains only `time_period`, `location`, and predictive samples; enriched output adds the point forecast and within-district alert fields.
+
+The Streamlit implementation in `app.py` has a different forecast workflow. It uses a `RandomForestClassifier` for within-district labels (`Low`, `Moderate`, `High`, `Extreme`), with a percentile fallback when the classifier is unavailable. Between-district labels compare predicted GAM counts across eligible districts for each forecast month, with a historical-count fallback when fewer than three predictions are available. Streamlit then combines both labels into an operational alert. Its Model Checks also evaluate a between-district classifier, but that classifier does not generate the forward between-district labels.
+
+Matching these Streamlit methods in CHAP would require implementing the within-district classifier, between-district peer comparisons, and combined alert rule. See the [comparison in the main README](../README.md#chap-and-streamlit-anomaly-methods).
 
 ## Convert the bundled data
 
