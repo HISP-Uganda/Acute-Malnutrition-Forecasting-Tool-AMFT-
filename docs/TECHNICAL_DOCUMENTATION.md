@@ -2,6 +2,8 @@
 
 AMFT monitors district-level GAM caseload anomalies and generates short-term case-count forecasts. The implementation is in `app.py`, the single Streamlit entry point. See the [README](../README.md) for installation and usage.
 
+The repository root also provides a separate DHIS2 CHAP model through `MLproject`, `MLProject.yaml`, `chap_model.py`, `train.py`, and `predict.py`. It follows the structure of [acute-malnutrition-RF-model](https://github.com/omielp/acute-malnutrition-RF-model). The CHAP path forecasts GAM detections per 1,000 assessed children with direct +1 and +3 Random Forest models and a non-recursive +2 bridge; it does not call the Streamlit pipeline described in sections 1–8 below.
+
 This reference combines the code walkthrough, implementation details, model evaluation, and operational impact measures.
 
 - [Codebase walkthrough](#codebase-walkthrough)
@@ -169,6 +171,8 @@ python -m unittest discover -s tests -v
 ```
 
 The tests cover sparse/constant histories, finite sample features, input-sensitive feature caching, shared cutoffs, under-five covariate handling, and No Data map rendering. Operational impact measurement is described in [Operational impact and field evidence](#operational-impact-and-field-evidence).
+
+The CHAP contract tests additionally verify causal preprocessing, target-quality exclusions, the lean feature schema, separate direct +1/+3 models, the non-recursive +2 bridge, optional enriched alert fields, AMFT-to-CHAP conversion, and 100 finite non-negative predictive samples. The optional `python chap_model/smoke_test.py` command runs the CHAP model against the bundled dataset and writes temporary artifacts under `data/private/`.
 
 ## Operational impact and field evidence
 

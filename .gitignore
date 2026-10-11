@@ -24,6 +24,9 @@ data/private/*
 *.feather
 *.log
 
+# CHAP model artifacts
+data/private/chap_smoke_test/
+
 # Large media exports
 demo/
 demo/*.mp4
