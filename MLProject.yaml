@@ -62,4 +62,4 @@ meta_data:
     Screening volume is a predictor, not a denominator for the GAM target.
   author: "HISP Uganda"
   author_assessed_status: orange
-  documentation_url: "https://github.com/omielp/acute-malnutrition-RF-model"
+  documentation_url: "https://github.com/HISP-Uganda/Acute-Malnutrition-Forecasting-Tool-AMFT-/blob/feat/dhis2-chap-model/chap_model/README.md"
