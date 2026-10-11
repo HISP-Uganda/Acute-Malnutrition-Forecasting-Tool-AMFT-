@@ -4,7 +4,7 @@ AMFT is a Streamlit-based decision-support tool for district-level acute malnutr
 
 The repository also includes a DHIS2 CHAP-compatible model alongside the Streamlit application. The root-level `MLproject`, `chap_model.py`, `train.py`, and `predict.py` follow the same layout and modeling contract as [acute-malnutrition-RF-model](https://github.com/omielp/acute-malnutrition-RF-model).
 
-The current version focuses on three connected outputs:
+The Streamlit application focuses on three connected outputs:
 
 - 4-level anomaly classification for within-district and between-district monitoring
 - 3-level operational alerts derived from anomaly combinations
@@ -25,6 +25,8 @@ The current version focuses on three connected outputs:
 - Download classified observed data and forecast outputs
 
 ## Risk Framework
+
+This framework describes the Streamlit application in `app.py`. The separate CHAP model uses the forecast and alert methods described in [DHIS2 CHAP Compatibility](#dhis2-chap-compatibility).
 
 ### 1. Anomaly Classification
 
@@ -117,13 +119,28 @@ The tool is designed for integration with DHIS2 and the Climate Health Analytics
 
 ## DHIS2 CHAP Compatibility
 
-The CHAP model is separate from the Streamlit pipeline. It accepts monthly `time_period`, `location`, and `disease_cases` observations, with `screened_u5` as the required denominator. Its target is the observed GAM detection rate:
-
-```text
-disease_cases / screened_u5 * 1,000
-```
+The CHAP model is separate from the Streamlit pipeline. It accepts monthly `time_period`, `location`, and `disease_cases` observations. Its target is reported GAM caseload (SAM + MAM), and forecast samples are returned in case-count units. `screened_u5` is an optional predictor of screening activity, rather than a denominator for the target. Missing screening data do not exclude otherwise valid GAM counts.
 
 The metadata declares the same 11 climate, child-health, service, reporting, and population covariates as the reference model. The implementation applies causal missing-value handling and past-only outlier caps, fits separate Random Forest models for horizons +1 and +3, and bridges +2 from paired +1/+3 samples without recursive prediction. Default output contains `time_period`, `location`, and `sample_0` through `sample_99`. Set `CHAP_INCLUDE_RISK_OUTPUT=1` to append the point forecast and direct `Monitor`/`Alert`/`Respond` fields for compatible downstream testing.
+
+These optional alerts compare forecast GAM counts with district historical case-count p90/p95 thresholds. Models previously trained on detection rates must be retrained with the current code; incompatible saved models are rejected.
+
+### CHAP and Streamlit anomaly methods
+
+Both pipelines forecast GAM case counts, but their forecast anomaly methods differ:
+
+| Component | CHAP (`chap_model.py`) | Streamlit (`app.py`) |
+|---|---|---|
+| GAM forecasting | Separate 400-tree `RandomForestRegressor` models for +1 and +3 months; +2 averages paired samples | Shared 700-tree `RandomForestRegressor` with three recursive monthly steps |
+| Within-district forecast anomalies | Compares the mean forecast with the district's historical GAM count p90/p95 thresholds; no `RandomForestClassifier` | Uses a `RandomForestClassifier` to predict `Low`, `Moderate`, `High`, or `Extreme`, with a percentile fallback when the classifier is unavailable |
+| Between-district forecast anomalies | Not implemented | Compares predicted GAM counts across eligible districts for each future month; uses historical counts when fewer than three district predictions are available |
+| Operational alerts | Optional `operational_alert` reflects only the within-district threshold comparison | Combines within-district and between-district anomaly labels into `Operational_Alert` |
+
+CHAP's enriched output assigns `Monitor` below p90, `Alert` from p90 to below p95, and `Respond` at or above p95. These alerts require a direct +1 or +3 forecast and at least nine valid historical observations for the district. The +2 bridge and rows without sufficient history or a direct forecast remain `No Data` in alert fields. Default CHAP output contains forecast samples only; CHAP does not export separate within-district or between-district anomaly labels.
+
+Streamlit evaluates both within-district and between-district classifiers in Model Checks, but its forward between-district labels use peer percentile comparisons. Adding the within-district classifier, peer comparisons, and combined alert rule to CHAP would be additional implementation work.
+
+### Conversion and verification
 
 Convert the bundled data into CHAP format:
 
@@ -238,6 +255,8 @@ Observed IPC AMN severity can be calculated if the dataset includes a direct GAM
 - Ensure district names match the CSV closely enough for joining
 
 ## Model Approach
+
+This section describes the Streamlit models. See [CHAP and Streamlit anomaly methods](#chap-and-streamlit-anomaly-methods) for the separate CHAP implementation.
 
 ### Regression
 

@@ -2,7 +2,7 @@
 
 AMFT monitors district-level GAM caseload anomalies and generates short-term case-count forecasts. The implementation is in `app.py`, the single Streamlit entry point. See the [README](../README.md) for installation and usage.
 
-The repository root also provides a separate DHIS2 CHAP model through `MLproject`, `MLProject.yaml`, `chap_model.py`, `train.py`, and `predict.py`. It follows the structure of [acute-malnutrition-RF-model](https://github.com/omielp/acute-malnutrition-RF-model). The CHAP path forecasts GAM detections per 1,000 assessed children with direct +1 and +3 Random Forest models and a non-recursive +2 bridge; it does not call the Streamlit pipeline described in sections 1–8 below.
+The repository root also provides a separate DHIS2 CHAP model through `MLproject`, `MLProject.yaml`, `chap_model.py`, `train.py`, and `predict.py`. It follows the structure of [acute-malnutrition-RF-model](https://github.com/omielp/acute-malnutrition-RF-model). The CHAP path forecasts GAM case counts (SAM + MAM) with direct +1 and +3 Random Forest regressors and a non-recursive +2 bridge. Its optional alerts use within-district historical count thresholds; it does not use an anomaly classifier or between-district comparisons. It does not call the Streamlit pipeline described in sections 1–8 below. See [CHAP forecasting and anomaly outputs](#chap-forecasting-and-anomaly-outputs) for its separate behavior.
 
 This reference combines the code walkthrough, implementation details, model evaluation, and operational impact measures.
 
@@ -10,6 +10,7 @@ This reference combines the code walkthrough, implementation details, model eval
 - [Setup and inputs](#1-setup-and-helper-functions)
 - [Model training and evaluation](#5-model-training-and-evaluation)
 - [Forecasting and uncertainty](#6-forecasting-and-uncertainty)
+- [CHAP forecasting and anomaly outputs](#chap-forecasting-and-anomaly-outputs)
 - [Verification](#verification)
 - [Operational impact and field evidence](#operational-impact-and-field-evidence)
 
@@ -113,6 +114,8 @@ The regression factory creates a 700-tree Random Forest with maximum depth 14, m
 
 Classification also uses 700 trees. Within-district classification uses maximum depth 16 and minimum leaf size 1; between-district classification uses depth 14 and leaf size 2. Class weights and tuned probability thresholds adjust predictions. `RiskLabelEncoder` preserves Low, Moderate, High, Extreme ordering.
 
+Both classifiers are evaluated in Model Checks. Forward forecasting uses the within-district classifier; forward between-district labels come from peer percentile comparisons, as described in section 6.
+
 `wf_splits()` creates expanding chronological training windows and later test blocks, requesting up to six folds after an initial 12-month span. Folds require at least 10 training rows and five test rows; insufficient data produce an interface message.
 
 Regression outputs include MAE, RMSE, signed mean error, median/P90 absolute error, residuals, and feature importance. Signed error is predicted minus actual; positive mean error indicates overprediction. Classification outputs include accuracy, balanced accuracy, macro recall, weighted F1, per-class sensitivity/specificity/precision/NPV, likelihood ratios, and confusion-matrix counts.
@@ -162,6 +165,23 @@ Downloads include classified observations, detailed forecast records, district s
 
 Streamlit caching reuses loading, feature, evaluation, and forecast computations. Session state retains trained results and refreshes them when the data key or `MODEL_SCHEMA_VERSION` changes. Uploaded data use a content hash; local inputs use their path. When replacing a local CSV at the same path, clear Streamlit's cache and start a new session or restart the app to refresh both loaded data and retained model results.
 
+## CHAP forecasting and anomaly outputs
+
+`chap_model.py` implements an independent case-count pipeline. `normalize_dataframe()` and `add_gam_count_target()` retain finite, non-negative observed GAM counts and exclude missing, invalid, or duplicated location-month targets. Screening volume (`screened_u5`) is a predictor and does not divide or determine the validity of the target. The model applies `log1p` internally and restores predictions to case counts. Saved models trained on the former detection-rate target must be retrained; the model-version check rejects incompatible artifacts.
+
+`train_model()` fits separate 400-tree `RandomForestRegressor` models for horizons +1 and +3. A requested +2 month averages paired samples from those models without recursive prediction. Default output contains `time_period`, `location`, and `sample_0` through `sample_99`, all in GAM case-count units. Sparse locations receive a finite training-derived fallback sample distribution.
+
+`CHAP_INCLUDE_RISK_OUTPUT=1` enables `point_forecast`, `operational_alert`, and `operational_alert_code`. `point_forecast` is the mean of the predictive samples. For a direct +1 or +3 forecast with at least nine valid historical observations, `build_prediction_rows()` compares this mean with the district's historical GAM case-count p90 and p95:
+
+| Within-district threshold | `operational_alert` | `operational_alert_code` |
+| --- | --- | --- |
+| Below p90 | Monitor | 1 |
+| p90 to below p95 | Alert | 2 |
+| p95 and above | Respond | 3 |
+| +2 bridge, insufficient history, or no direct forecast | No Data | 0 |
+
+CHAP does not train a `RandomForestClassifier`, perform between-district anomaly comparisons, or export separate within-district and between-district anomaly labels. Its `operational_alert` reflects only the within-district threshold comparison. Streamlit instead predicts four-level within-district labels with a classifier, compares future peer counts for between-district labels, and combines both labels into `Operational_Alert`. Implementing those three steps in CHAP would be additional work. See the [CHAP model README](../chap_model/README.md#within-district-and-between-district-anomalies) for deployment-facing details.
+
 ## Verification
 
 Run the existing regression checks from the project root:
@@ -172,7 +192,7 @@ python -m unittest discover -s tests -v
 
 The tests cover sparse/constant histories, finite sample features, input-sensitive feature caching, shared cutoffs, under-five covariate handling, and No Data map rendering. Operational impact measurement is described in [Operational impact and field evidence](#operational-impact-and-field-evidence).
 
-The CHAP contract tests additionally verify causal preprocessing, target-quality exclusions, the lean feature schema, separate direct +1/+3 models, the non-recursive +2 bridge, optional enriched alert fields, AMFT-to-CHAP conversion, and 100 finite non-negative predictive samples. The optional `python chap_model/smoke_test.py` command runs the CHAP model against the bundled dataset and writes temporary artifacts under `data/private/`.
+The CHAP contract tests additionally verify causal preprocessing, count targets and lags independent of screening volume, target-quality exclusions, the lean feature schema, separate direct +1/+3 models, the non-recursive +2 bridge, sample and point-forecast case-count units, historical count thresholds for enriched alerts, rejection of saved rate models, AMFT-to-CHAP conversion, and 100 finite non-negative predictive samples. The optional `python chap_model/smoke_test.py` command runs the CHAP model against the bundled dataset and writes temporary artifacts under `data/private/`.
 
 ## Operational impact and field evidence
 

@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
 
-MODEL_VERSION = "chap-rf-v22-finite-chap-samples"
+MODEL_VERSION = "chap-rf-v23-gam-case-counts"
 RISK_LEVELS = ["Monitor", "Alert", "Respond"]
 RISK_ORDER = {
     "Monitor": 0,
@@ -108,8 +108,6 @@ BASE_FEATURES = [
     "Seasonal_Lag12",
 ]
 N_SAMPLES = 100
-GAM_RATE_SCALE = 1_000.0
-GAM_DETECTION_CI_WIDTH_MAX = 125.0
 MIN_WITHIN_HISTORY_MONTHS = 9
 
 
@@ -235,7 +233,7 @@ def flag_outliers_by_group(df: pd.DataFrame, group_col: str, value_col: str) -> 
 
 def sanitize_target_values(values: pd.Series) -> pd.Series:
     numeric = pd.to_numeric(values, errors="coerce")
-    return numeric.mask(numeric < 0)
+    return numeric.where(np.isfinite(numeric) & numeric.ge(0))
 
 
 def add_target_qc_flags(df: pd.DataFrame, group_col: str, target_col: str) -> pd.DataFrame:
@@ -245,53 +243,26 @@ def add_target_qc_flags(df: pd.DataFrame, group_col: str, target_col: str) -> pd
     return df
 
 
-def wilson_interval_per_1000(cases: pd.Series, assessed: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """Return 95% Wilson interval bounds for an observed detection rate."""
-    cases = pd.to_numeric(cases, errors="coerce")
-    assessed = pd.to_numeric(assessed, errors="coerce")
-    valid = cases.notna() & cases.ge(0) & assessed.gt(0) & cases.le(assessed)
-    proportion = (cases / assessed).where(valid)
-    z = 1.959963984540054
-    denominator = 1.0 + (z ** 2 / assessed.where(valid))
-    center = (proportion + z ** 2 / (2.0 * assessed.where(valid))) / denominator
-    half_width = z * np.sqrt(
-        (proportion * (1.0 - proportion) + z ** 2 / (4.0 * assessed.where(valid)))
-        / assessed.where(valid)
-    ) / denominator
-    return (center - half_width) * GAM_RATE_SCALE, (center + half_width) * GAM_RATE_SCALE
-
-
-def add_gam_rate_target(df: pd.DataFrame, target_col: str, assessed_col: str) -> pd.DataFrame:
-    """Create an observed-only GAM detection-rate target without filling missing GAM."""
+def add_gam_count_target(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+    """Keep observed GAM case counts as the target, without filling or clipping them."""
     df = df.copy()
     observed = pd.to_numeric(df[target_col], errors="coerce")
-    assessed = pd.to_numeric(df[assessed_col], errors="coerce") if assessed_col in df.columns else pd.Series(np.nan, index=df.index)
+    counts = sanitize_target_values(observed)
     duplicate = df.get("target_duplicate_qc", pd.Series(0.0, index=df.index)).astype(bool)
-    basic_valid = observed.notna() & observed.ge(0) & assessed.gt(0) & observed.le(assessed) & ~duplicate
-    ci_lower, ci_upper = wilson_interval_per_1000(observed, assessed)
-    ci_width = ci_upper - ci_lower
-    imprecise = basic_valid & ci_width.gt(GAM_DETECTION_CI_WIDTH_MAX)
-    valid = basic_valid & ~imprecise
+    valid = counts.notna() & ~duplicate
 
     reason = pd.Series("", index=df.index, dtype="object")
     reason.loc[observed.isna()] = "missing_gam"
-    reason.loc[observed.notna() & assessed.isna()] = "missing_children_assessed"
-    reason.loc[observed.notna() & assessed.notna() & assessed.le(0)] = "invalid_children_assessed"
-    reason.loc[observed.notna() & assessed.gt(0) & observed.gt(assessed)] = "gam_exceeds_children_assessed"
+    reason.loc[observed.lt(0)] = "negative_gam"
+    reason.loc[observed.notna() & ~np.isfinite(observed)] = "nonfinite_gam"
     reason.loc[duplicate] = "duplicate_district_month"
-    reason.loc[imprecise] = "imprecise_detection_rate"
 
     df[f"{target_col}_observed"] = observed
-    df["children_assessed_observed"] = assessed
-    df["gam_detection_ci_lower"] = ci_lower
-    df["gam_detection_ci_upper"] = ci_upper
-    df["gam_detection_ci_width"] = ci_width
-    df["target_precision_qc"] = imprecise.astype(float)
     df["target_valid"] = valid.astype(float)
     df["target_exclusion_reason"] = reason
     df["target_is_observed"] = valid.astype(float)
     df["target_training_weight"] = valid.astype(float)
-    df[target_col] = (observed / assessed * GAM_RATE_SCALE).where(valid)
+    df[target_col] = counts.where(valid)
     return df
 
 
@@ -435,7 +406,7 @@ def normalize_dataframe(df: pd.DataFrame, require_target: bool) -> pd.DataFrame:
     norm = norm.dropna(subset=["Date"]).copy()
 
     if target_col is not None:
-        norm["disease_cases"] = sanitize_target_values(df.loc[norm.index, target_col])
+        norm["disease_cases"] = pd.to_numeric(df.loc[norm.index, target_col], errors="coerce")
     elif require_target:
         raise ValueError("Observed inputs must include disease_cases.")
     else:
@@ -449,13 +420,12 @@ def normalize_dataframe(df: pd.DataFrame, require_target: bool) -> pd.DataFrame:
         norm[covariate] = pd.to_numeric(values.loc[norm.index], errors="coerce")
         covariates.append(covariate)
 
-    if require_target and "screened_u5" not in norm.columns:
-        raise ValueError("Observed inputs must include screened_u5 (children assessed) to calculate the GAM detection-rate target.")
-
     norm = norm.sort_values(["location", "Date"]).reset_index(drop=True)
     norm = add_target_qc_flags(norm, group_col="location", target_col="disease_cases")
     if require_target:
-        norm = add_gam_rate_target(norm, target_col="disease_cases", assessed_col="screened_u5")
+        norm = add_gam_count_target(norm, target_col="disease_cases")
+    else:
+        norm["disease_cases"] = sanitize_target_values(norm["disease_cases"])
     norm = impute_modeled_covariates(norm)
     for covariate in covariates:
         norm[covariate] = log_transform_covariate(covariate, norm[covariate])
@@ -482,7 +452,7 @@ def transform_target(values: pd.Series | np.ndarray) -> pd.Series | np.ndarray:
 
 
 def inverse_target(values: float | np.ndarray, scaler: dict | None = None) -> float | np.ndarray:
-    """Restore the causal log1p GAM target; scaler is retained for API compatibility."""
+    """Restore GAM case counts from log1p; scaler is retained for API compatibility."""
     return np.expm1(np.asarray(values))
 
 

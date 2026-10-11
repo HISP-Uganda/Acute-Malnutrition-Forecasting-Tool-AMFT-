@@ -1,6 +1,8 @@
+import pickle
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -9,6 +11,8 @@ from pandas.testing import assert_frame_equal
 from chap_model import (
     BASE_FEATURES,
     CORE_COVARIATES,
+    N_SAMPLES,
+    build_prediction_rows,
     build_training_features,
     classify_risk,
     infer_covariate_columns,
@@ -107,7 +111,6 @@ class CausalPreprocessingTests(unittest.TestCase):
                 "time_period": ["2020-01", "2020-02", "2020-03", "2020-04", "2020-05"],
                 "location": ["A"] * 5,
                 "disease_cases": [10, 12, 11, 15, 14],
-                "screened_u5": [1000, 1200, 1100, 1500, 1400],
                 "mean_temperature": [20.0, 21.0, 20.0, 22.0, 21.0],
             }
         )
@@ -119,7 +122,6 @@ class CausalPreprocessingTests(unittest.TestCase):
                         "time_period": ["2020-01", "2020-02"],
                         "location": ["B", "B"],
                         "disease_cases": [5, 6],
-                        "screened_u5": [1000, 1000],
                     }
                 ),
             ],
@@ -212,12 +214,12 @@ class CausalPreprocessingTests(unittest.TestCase):
                 "No Data",
             )
 
-    def test_missing_or_unreliable_gam_is_not_imputed_or_used_for_training(self):
+    def test_missing_or_invalid_gam_is_not_imputed_or_used_for_training(self):
         data = pd.DataFrame(
             {
                 "time_period": ["2020-01", "2020-02", "2020-03", "2020-04", "2020-05", "2020-06", "2020-07", "2020-08"],
                 "location": ["A"] * 8,
-                "disease_cases": [10, None, 12, 1300, 15, 16, 17, 18],
+                "disease_cases": [10, None, 12, -1, 15, 16, 17, 18],
                 "screened_u5": [1000, 1000, 1200, 1000, 1500, 1600, 1700, 1800],
             }
         )
@@ -227,29 +229,110 @@ class CausalPreprocessingTests(unittest.TestCase):
         self.assertTrue(pd.isna(normalized.loc[1, "disease_cases"]))
         self.assertTrue(pd.isna(normalized.loc[3, "disease_cases"]))
         self.assertEqual(normalized.loc[1, "target_exclusion_reason"], "missing_gam")
-        self.assertEqual(normalized.loc[3, "target_exclusion_reason"], "gam_exceeds_children_assessed")
+        self.assertEqual(normalized.loc[3, "target_exclusion_reason"], "negative_gam")
 
         features, _, _ = build_training_features(normalized, infer_covariate_columns(normalized))
         self.assertNotIn(pd.Timestamp("2020-02-01"), features["Date"].tolist())
         self.assertNotIn(pd.Timestamp("2020-04-01"), features["Date"].tolist())
 
-    def test_imprecise_detection_rate_is_flagged_without_using_population(self):
+    def test_target_and_lags_remain_counts_regardless_of_screening(self):
         data = pd.DataFrame(
             {
-                "time_period": ["2020-01", "2020-02"],
-                "location": ["A", "A"],
-                "disease_cases": [1, 10],
-                "screened_u5": [1, 1000],
-                "population_u5": [1_000_000, 1],
+                "time_period": [f"2020-{month:02d}" for month in range(1, 7)],
+                "location": ["A"] * 6,
+                "disease_cases": [1, 10, 12, 1300, 15, 16],
+                "screened_u5": [1, 2000, None, 1000, 0, -1],
             }
         )
 
         normalized = normalize_dataframe(data, require_target=True)
-        self.assertTrue(pd.isna(normalized.loc[0, "disease_cases"]))
-        self.assertEqual(normalized.loc[0, "target_exclusion_reason"], "imprecise_detection_rate")
-        self.assertEqual(normalized.loc[0, "target_precision_qc"], 1.0)
-        self.assertEqual(normalized.loc[1, "disease_cases"], 10.0)
-        self.assertEqual(normalized.loc[1, "target_precision_qc"], 0.0)
+        self.assertEqual(normalized["disease_cases"].tolist(), data["disease_cases"].tolist())
+        self.assertTrue(normalized["target_valid"].eq(1).all())
+        self.assertEqual(normalized.loc[3, "target_outlier_qc"], 1.0)
+
+        features, _, _ = build_training_features(normalized, infer_covariate_columns(normalized))
+        self.assertEqual(features["Target"].tolist(), [1300, 15, 16])
+        self.assertEqual(features.loc[0, ["Lag1", "Lag2", "Lag3"]].tolist(), [12, 10, 1])
+        np.testing.assert_allclose(features["Target_Transformed"], np.log1p([1300, 15, 16]))
+
+        without_screening = normalize_dataframe(data.drop(columns="screened_u5"), require_target=True)
+        without_features, _, _ = build_training_features(without_screening, [])
+        assert_frame_equal(features[[*BASE_FEATURES, "Target"]], without_features[[*BASE_FEATURES, "Target"]])
+
+    def test_duplicate_and_nonfinite_counts_are_excluded(self):
+        data = pd.DataFrame(
+            {
+                "time_period": ["2020-01", "2020-01", "2020-02", "2020-03", "2020-04"],
+                "location": ["A"] * 5,
+                "disease_cases": [10, 12, np.inf, -np.inf, 0],
+            }
+        )
+        normalized = normalize_dataframe(data, require_target=True)
+        self.assertTrue(normalized.loc[:3, "disease_cases"].isna().all())
+        self.assertEqual(normalized["target_exclusion_reason"].tolist(), [
+            "duplicate_district_month", "duplicate_district_month", "nonfinite_gam", "nonfinite_gam", "",
+        ])
+        self.assertEqual(normalized.loc[4, "disease_cases"], 0)
+        self.assertEqual(normalized.loc[4, "target_valid"], 1)
+
+    def test_forecast_samples_and_point_forecasts_are_case_counts(self):
+        train = pd.DataFrame(
+            {
+                "time_period": pd.date_range("2020-01-01", periods=12, freq="MS").strftime("%Y-%m"),
+                "location": ["A"] * 12,
+                "disease_cases": [250] * 12,
+                "screened_u5": [5000] * 12,
+            }
+        )
+        future = pd.DataFrame(
+            {"time_period": ["2021-01", "2021-02", "2021-03"], "location": ["A"] * 3}
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            train.to_csv(root / "train.csv", index=False)
+            future.to_csv(root / "future.csv", index=False)
+            train_model(str(root / "train.csv"), str(root / "model.pkl"))
+            predict_model(
+                str(root / "model.pkl"), str(root / "train.csv"), str(root / "future.csv"),
+                str(root / "predictions.csv"), include_risk_output=True,
+            )
+            predictions = pd.read_csv(root / "predictions.csv")
+            self.assertEqual(len(predictions), 3)
+            np.testing.assert_allclose(predictions.filter(like="sample_").to_numpy(), 250)
+            np.testing.assert_allclose(predictions["point_forecast"], 250)
+
+            # Sparse locations also receive fallback samples on the count scale.
+            with open(root / "model.pkl", "rb") as model_file:
+                artifact = pickle.load(model_file)
+            np.testing.assert_allclose(artifact["fallback_samples"], 250)
+
+    def test_forecast_alerts_compare_counts_with_historic_count_thresholds(self):
+        historic = normalize_dataframe(pd.DataFrame({
+            "time_period": pd.date_range("2020-01-01", periods=10, freq="MS").strftime("%Y-%m"),
+            "location": ["A"] * 10,
+            "disease_cases": list(range(100, 110)),
+            "screened_u5": [100_000] * 10,
+        }), require_target=True)
+        future = normalize_dataframe(pd.DataFrame({
+            "time_period": ["2020-11", "2021-01"], "location": ["A"] * 2,
+        }), require_target=False)
+        artifact = {"models": {"1": {}, "3": {}}}
+        for count, expected, code in [(108, "Monitor", 1), (108.3, "Alert", 2), (109, "Respond", 3)]:
+            with self.subTest(count=count), patch(
+                "chap_model.direct_model_samples", return_value=np.full(N_SAMPLES, count),
+            ):
+                predictions = build_prediction_rows(historic, future, artifact, include_risk_output=True)
+                self.assertEqual(predictions["operational_alert"].tolist(), [expected] * 2)
+                self.assertEqual(predictions["operational_alert_code"].tolist(), [code] * 2)
+
+    def test_saved_rate_model_requires_retraining(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_path = root / "model.pkl"
+            with open(model_path, "wb") as model_file:
+                pickle.dump({"model_version": "chap-rf-v22-finite-chap-samples"}, model_file)
+            with self.assertRaisesRegex(ValueError, "Retrain the CHAP model"):
+                predict_model(str(model_path), "historic.csv", "future.csv", str(root / "out.csv"))
 
     def test_operational_alert_thresholds_use_p90_p95(self):
         self.assertEqual(classify_risk(89.9, 90, 95), "Monitor")

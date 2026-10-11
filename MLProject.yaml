@@ -37,8 +37,8 @@ meta_data:
   display_name: "Acute Malnutrition Forecasting Tool"
   description: >
     Monthly district-level acute malnutrition forecasting model prepared for
-    DHIS2 CHAP integration. The model converts reported GAM cases and children
-    assessed into GAM detection rates per 1,000 assessed children and returns probabilistic forecasts as sample columns in
+    DHIS2 CHAP integration. The model forecasts reported GAM case counts
+    (SAM + MAM) and returns probabilistic forecasts in case-count units as sample columns in
     the default CHAP output mode. It uses separate direct models for months +1
     and +3. If CHAP requests +2, the output uses a non-recursive bridge from
     the independent +1 and +3 forecast samples so every CHAP sample is finite.
@@ -46,14 +46,20 @@ meta_data:
     inputs, with malaria_confirmed_u5, pneumonia_cases_u5, diarrhea_u5,
     and screened_u5 as under-5 case-count or
     service-volume covariates, reporting_rate as a district
-    reporting-quality covariate, population_u5 as the under-5 denominator,
+    reporting-quality covariate, population_u5 as an under-5 population-size covariate,
     and low_birth_weight_babies as a
     neonatal indicator within the same under-5 scope. Missing covariates are
     optional and are imputed with rule-based
     district-aware preprocessing, extreme modeled covariates are capped with
     robust past-only thresholds, and suspicious target spikes are flagged for
     QC rather than clipped by default. Optional direct operational-alert
-    columns are available only in enriched output mode.
+    columns use within-district historical case-count p90/p95 comparisons
+    for Monitor, Alert, and Respond, and are available only in enriched output
+    mode. These alerts require a direct +1 or +3 forecast and at least nine
+    valid historical observations. CHAP does not use an anomaly classifier,
+    perform between-district anomaly comparisons, or combine both anomaly
+    types into an operational alert as the Streamlit application does.
+    Screening volume is a predictor, not a denominator for the GAM target.
   author: "HISP Uganda"
   author_assessed_status: orange
   documentation_url: "https://github.com/omielp/acute-malnutrition-RF-model"
