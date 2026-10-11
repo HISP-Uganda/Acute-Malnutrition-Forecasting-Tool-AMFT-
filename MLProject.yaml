@@ -1,0 +1,59 @@
+name: acute_malnutrition_chap
+uv_env: pyproject.toml
+supported_period_type: month
+target: disease_cases
+required_covariates:
+  - mean_temperature
+  - rainfall
+  - mean_relative_humidity
+  - average_gpp
+  - malaria_confirmed_u5
+  - pneumonia_cases_u5
+  - diarrhea_u5
+  - low_birth_weight_babies
+  - screened_u5
+  - reporting_rate
+  - population_u5
+
+min_prediction_length: 1
+max_prediction_length: 3
+
+entry_points:
+  train:
+    parameters:
+      train_data: str
+      model: str
+    command: "python train.py {train_data} {model}"
+
+  predict:
+    parameters:
+      historic_data: str
+      future_data: str
+      model: str
+      out_file: str
+    command: "python predict.py {model} {historic_data} {future_data} {out_file}"
+
+meta_data:
+  display_name: "Acute Malnutrition Forecasting Tool"
+  description: >
+    Monthly district-level acute malnutrition forecasting model prepared for
+    DHIS2 CHAP integration. The model converts reported GAM cases and children
+    assessed into GAM detection rates per 1,000 assessed children and returns probabilistic forecasts as sample columns in
+    the default CHAP output mode. It uses separate direct models for months +1
+    and +3. If CHAP requests +2, the output uses a non-recursive bridge from
+    the independent +1 and +3 forecast samples so every CHAP sample is finite.
+    All clinical and service-delivery covariates are interpreted as under-5
+    inputs, with malaria_confirmed_u5, pneumonia_cases_u5, diarrhea_u5,
+    and screened_u5 as under-5 case-count or
+    service-volume covariates, reporting_rate as a district
+    reporting-quality covariate, population_u5 as the under-5 denominator,
+    and low_birth_weight_babies as a
+    neonatal indicator within the same under-5 scope. Missing covariates are
+    optional and are imputed with rule-based
+    district-aware preprocessing, extreme modeled covariates are capped with
+    robust past-only thresholds, and suspicious target spikes are flagged for
+    QC rather than clipped by default. Optional direct operational-alert
+    columns are available only in enriched output mode.
+  author: "HISP Uganda"
+  author_assessed_status: orange
+  documentation_url: "https://github.com/omielp/acute-malnutrition-RF-model"

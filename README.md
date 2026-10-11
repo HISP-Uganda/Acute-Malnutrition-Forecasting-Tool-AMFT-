@@ -2,6 +2,8 @@
 
 AMFT is a Streamlit-based decision-support tool for district-level acute malnutrition monitoring in Uganda. It combines anomaly detection, short-term forecasting, geospatial visualization, data quality checks, and model evaluation to support early warning and operational planning.
 
+The repository also includes a DHIS2 CHAP-compatible model alongside the Streamlit application. The root-level `MLproject`, `chap_model.py`, `train.py`, and `predict.py` follow the same layout and modeling contract as [acute-malnutrition-RF-model](https://github.com/omielp/acute-malnutrition-RF-model).
+
 The current version focuses on three connected outputs:
 
 - 4-level anomaly classification for within-district and between-district monitoring
@@ -112,6 +114,30 @@ The Streamlit app is organized into four main tabs:
 The tool is designed for integration with DHIS2 and the Climate Health Analytics Platform (CHAP).
 
 ![System setup in the DHIS2 eco system](Screenshots/architecture.png)
+
+## DHIS2 CHAP Compatibility
+
+The CHAP model is separate from the Streamlit pipeline. It accepts monthly `time_period`, `location`, and `disease_cases` observations, with `screened_u5` as the required denominator. Its target is the observed GAM detection rate:
+
+```text
+disease_cases / screened_u5 * 1,000
+```
+
+The metadata declares the same 11 climate, child-health, service, reporting, and population covariates as the reference model. The implementation applies causal missing-value handling and past-only outlier caps, fits separate Random Forest models for horizons +1 and +3, and bridges +2 from paired +1/+3 samples without recursive prediction. Default output contains `time_period`, `location`, and `sample_0` through `sample_99`. Set `CHAP_INCLUDE_RISK_OUTPUT=1` to append the point forecast and direct `Monitor`/`Alert`/`Respond` fields for compatible downstream testing.
+
+Convert the bundled data into CHAP format:
+
+```bash
+python chap_model/convert_amft_data.py data/sample/data.csv data/private/chap_amft.csv
+```
+
+Run the included end-to-end contract check:
+
+```bash
+python chap_model/smoke_test.py
+```
+
+The root also contains `MLProject.yaml` for CHAP model-template seeding flows. See [chap_model/README.md](chap_model/README.md) for the complete input schema, direct entry-point commands, CHAP CLI evaluation, and deployment notes.
 
 ## Installation
 
@@ -334,6 +360,15 @@ python -m pip install -r requirements.txt
 ├── .streamlit/
 │   └── config.toml
 ├── app.py
+├── MLproject
+├── MLProject.yaml
+├── chap_model.py
+├── train.py
+├── predict.py
+├── chap_model/
+│   ├── README.md
+│   ├── convert_amft_data.py
+│   └── smoke_test.py
 ├── data/
 │   ├── private/
 │   │   └── .gitkeep
@@ -345,9 +380,13 @@ python -m pip install -r requirements.txt
 │   └── TECHNICAL_DOCUMENTATION.md
 ├── Screenshots/
 ├── tests/
+│   ├── test_chap_converter.py
+│   ├── test_chap_model.py
 │   └── test_sample_data.py
 ├── README.md
-└── requirements.txt
+├── pyproject.toml
+├── requirements.txt
+└── uv.lock
 ```
 
 The local `.venv/` contains installed dependencies and is ignored by Git. `data/private/` is reserved for private working datasets; the screenshots retained here are referenced by this README.
